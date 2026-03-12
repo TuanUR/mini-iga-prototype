@@ -208,31 +208,33 @@ def render_case_edit_dialog(
             if comment_key not in st.session_state:
                 st.session_state[comment_key] = default_comment
 
-            st.selectbox(
-                "Aktion",
-                options=action_options,
-                format_func=lambda x: action_labels[x],
-                key=action_key,
-            )
-            st.text_area("Kommentar", key=comment_key, max_chars=500)
-
-            selected_action = str(st.session_state[action_key])
-            normalized_comment = str(st.session_state[comment_key]).strip()
-            reviewer_decision, final_decision, action_type = map_action_to_decision(
-                selected_action, recommendation_label
-            )
             button_label = (
                 "Entscheidung speichern"
                 if current_decision is None
                 else "Entscheidung aktualisieren"
             )
 
-            if st.button(button_label, type="primary", key=f"prepare_save_{case_id}"):
+            with st.form(key=f"decision_form_{case_id}", clear_on_submit=False):
+                selected_action = st.selectbox(
+                    "Aktion",
+                    options=action_options,
+                    format_func=lambda x: action_labels[x],
+                    key=action_key,
+                )
+                comment_input = st.text_area("Kommentar", key=comment_key, max_chars=500)
+                submit_pressed = st.form_submit_button(button_label, type="primary")
+
+            if submit_pressed:
+                normalized_comment = str(comment_input).strip()
+                reviewer_decision, final_decision, action_type = map_action_to_decision(
+                    str(selected_action), recommendation_label
+                )
                 if current_decision is not None:
                     old_decision = str(current_decision["reviewer_decision"]).strip()
                     old_comment = str(current_decision["comment"]).strip()
                     if old_decision == reviewer_decision and old_comment == normalized_comment:
                         st.warning("Keine Änderungen zum Speichern vorhanden.")
+                        st.session_state.pop("pending_case_decision", None)
                         return
                 st.session_state["pending_case_decision"] = {
                     "case_id": str(case_row["case_id"]),
@@ -668,6 +670,47 @@ def _safe_get(obj: object, key: str) -> object | None:
     return None
 
 
+def build_worklist_table(cases_df: pd.DataFrame) -> pd.DataFrame:
+    table_df = cases_df[
+        [
+            "case_id",
+            "user_id",
+            "department",
+            "role",
+            "application",
+            "entitlement",
+            "recommendation_label",
+            "recommendation_score",
+            "confidence",
+            "case_status",
+        ]
+    ].copy()
+    table_df = table_df.rename(columns={"user_id": "user_name"})
+    table_df = table_df.sort_values("recommendation_score", ascending=False).reset_index(drop=True)
+    return table_df
+
+
+def extract_single_selected_case_id(
+    selection_event: object, table_df: pd.DataFrame, widget_key: str
+) -> str | None:
+    selection = _safe_get(selection_event, "selection")
+    rows = _safe_get(selection, "rows")
+    if not isinstance(rows, (list, tuple)):
+        widget_state = st.session_state.get(widget_key, {})
+        rows = _safe_get(_safe_get(widget_state, "selection"), "rows")
+    if not isinstance(rows, (list, tuple)) or len(rows) != 1:
+        return None
+
+    row_idx = rows[0]
+    try:
+        row_idx_int = int(row_idx)
+    except (TypeError, ValueError):
+        return None
+    if row_idx_int < 0 or row_idx_int >= len(table_df):
+        return None
+    return str(table_df.iloc[row_idx_int]["case_id"])
+
+
 def extract_heatmap_selection(event: object) -> tuple[str, str] | None:
     selection = _safe_get(event, "selection")
     points = _safe_get(selection, "points")
@@ -948,33 +991,6 @@ def render_overview(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None:
         "Nutzen Sie diese Kennzahlen und Verteilungen, um globale Muster zu erkennen, Prioritäten festzulegen und anschließend gezielt in die Fallprüfung zu wechseln."
     )
 
-    overview_table = cases_df[
-        [
-            "case_id",
-            "user_id",
-            "department",
-            "application",
-            "entitlement",
-            "recommendation_label",
-            "recommendation_score",
-            "case_status",
-        ]
-    ].rename(
-        columns={
-            "case_id": "fall_id",
-            "user_id": "benutzer",
-            "department": "abteilung",
-            "application": "anwendung",
-            "entitlement": "berechtigung",
-            "recommendation_label": "empfehlung",
-            "recommendation_score": "empfehlungs_score",
-            "case_status": "fallstatus",
-        }
-    )
-    overview_table["fallstatus"] = overview_table["fallstatus"].map(
-        {"open": "offen", "decided": "entschieden", "escalated": "eskaliert"}
-    )
-
     charts_col_1, charts_col_2 = st.columns(2)
 
     with charts_col_1:
@@ -1042,7 +1058,46 @@ def render_overview(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None:
     st.caption(
         "Die Tabelle zeigt alle aktuell gefilterten Fälle. Nutzen Sie die Übersicht zur Priorisierung und wechseln Sie anschließend in die Fallansicht, um einzelne Fälle im Detail zu prüfen."
     )
-    st.dataframe(overview_table, width="stretch", hide_index=True)
+    worklist_df = build_worklist_table(cases_df)
+    selection_event = st.dataframe(
+        worklist_df,
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="overview_worklist_table",
+    )
+
+    selected_case_id = extract_single_selected_case_id(
+        selection_event=selection_event,
+        table_df=worklist_df,
+        widget_key="overview_worklist_table",
+    )
+    valid_case_ids = set(cases_df["case_id"].astype(str))
+
+    if selected_case_id is None:
+        st.session_state.pop("worklist_selected_case_id", None)
+        if str(st.session_state.get("edit_case_id", "")) not in valid_case_ids:
+            st.session_state.pop("edit_case_id", None)
+        st.info("Bitte wählen Sie einen Fall aus der Tabelle aus.")
+        return
+
+    st.session_state["worklist_selected_case_id"] = selected_case_id
+    selected_case = cases_df.loc[cases_df["case_id"].astype(str) == selected_case_id].iloc[0]
+
+    st.markdown("#### Ausgewählter Fall")
+    st.write(f"- Fall-ID: `{selected_case['case_id']}`")
+    st.write(f"- Benutzer: `{selected_case['user_id']}`")
+    st.write(f"- Anwendung: `{selected_case['application']}`")
+    st.write(f"- Berechtigung: `{selected_case['entitlement']}`")
+    st.write(f"- Empfehlung: `{selected_case['recommendation_label']}`")
+
+    if st.button("Fall bearbeiten", type="primary", key=f"overview_edit_case_btn_{selected_case_id}"):
+        st.session_state["edit_case_id"] = selected_case_id
+
+    edit_case_id = str(st.session_state.get("edit_case_id", ""))
+    if edit_case_id in valid_case_ids:
+        render_case_edit_dialog(cases_df, decisions_df, edit_case_id)
 
 
 def render_heatmap(cases_df: pd.DataFrame) -> None:
@@ -1233,11 +1288,12 @@ def render_heatmap(cases_df: pd.DataFrame) -> None:
 def render_case_view(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None:
     st.subheader("Fallprüfung")
     st.caption(
-        "Details on demand: Wählen Sie einen Fall aus der Tabelle und öffnen Sie danach den Bearbeitungsdialog."
+        "Details on demand: Wählen Sie zuerst einen Fall in der Übersicht aus und öffnen Sie anschließend den Bearbeitungsdialog."
     )
 
     if len(cases_df) == 0:
         st.warning("Keine Fälle im aktuellen Filterkontext.")
+        st.session_state.pop("worklist_selected_case_id", None)
         st.session_state.pop("edit_case_id", None)
         st.session_state.pop("pending_case_decision", None)
         return
@@ -1249,54 +1305,18 @@ def render_case_view(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None
         else:
             st.success(str(feedback.get("text", "")))
 
-    table_df = cases_df[
-        [
-            "case_id",
-            "user_id",
-            "department",
-            "role",
-            "application",
-            "entitlement",
-            "recommendation_label",
-            "recommendation_score",
-            "confidence",
-            "case_status",
-        ]
-    ].copy()
-    table_df = table_df.rename(columns={"user_id": "user_name"})
-    table_df["case_status"] = table_df["case_status"].map(
-        {"open": "offen", "decided": "entschieden", "escalated": "eskaliert"}
-    )
-    table_df = table_df.sort_values("recommendation_score", ascending=False).reset_index(drop=True)
+    valid_case_ids = set(cases_df["case_id"].astype(str))
+    selected_case_id = str(st.session_state.get("worklist_selected_case_id", ""))
+    if selected_case_id not in valid_case_ids:
+        st.session_state.pop("worklist_selected_case_id", None)
+        selected_case_id = ""
 
-    selection_event = st.dataframe(
-        table_df,
-        width="stretch",
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key="case_review_table",
-    )
-
-    selected_case_id = None
-    selection = _safe_get(selection_event, "selection")
-    selected_rows = _safe_get(selection, "rows")
-    if isinstance(selected_rows, (list, tuple)) and len(selected_rows) == 1:
-        row_idx = selected_rows[0]
-        if isinstance(row_idx, int) and 0 <= row_idx < len(table_df):
-            selected_case_id = str(table_df.iloc[row_idx]["case_id"])
-    elif isinstance(selected_rows, (list, tuple)) and len(selected_rows) > 1:
-        st.warning("Bitte wählen Sie genau eine Zeile aus.")
-        st.session_state.pop("selected_case_id", None)
+    if selected_case_id == "":
+        st.info("Bitte wählen Sie in der Übersicht einen Fall aus der Worklist aus.")
+        if str(st.session_state.get("edit_case_id", "")) not in valid_case_ids:
+            st.session_state.pop("edit_case_id", None)
         return
 
-    if selected_case_id is None:
-        st.info("Bitte wählen Sie einen Fall aus der Tabelle aus.")
-        st.session_state.pop("selected_case_id", None)
-        st.session_state.pop("edit_case_id", None)
-        return
-
-    st.session_state["selected_case_id"] = selected_case_id
     selected_case = cases_df.loc[cases_df["case_id"].astype(str) == selected_case_id].iloc[0]
 
     st.markdown("#### Ausgewählter Fall")
@@ -1306,11 +1326,12 @@ def render_case_view(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None
     st.write(f"- Berechtigung: `{selected_case['entitlement']}`")
     st.write(f"- Empfehlung: `{selected_case['recommendation_label']}`")
 
-    if st.button("Fall bearbeiten", type="primary", key=f"edit_case_btn_{selected_case_id}"):
+    if st.button("Fall bearbeiten", type="primary", key=f"case_view_edit_case_btn_{selected_case_id}"):
         st.session_state["edit_case_id"] = selected_case_id
 
-    if st.session_state.get("edit_case_id") == selected_case_id:
-        render_case_edit_dialog(cases_df, decisions_df, selected_case_id)
+    edit_case_id = str(st.session_state.get("edit_case_id", ""))
+    if edit_case_id in valid_case_ids:
+        render_case_edit_dialog(cases_df, decisions_df, edit_case_id)
 
 
 def render_audit_log(
