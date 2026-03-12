@@ -1,0 +1,5 @@
+timestamp,case_id,reviewer,recommended,reviewer_decision,final_decision,action_type,comment
+2026-03-12T07:53:22.605435+00:00,CASE-0004,reviewer_1,review,confirm,review,confirm,
+2026-03-12T07:53:29.068547+00:00,CASE-0005,reviewer_1,revoke,confirm,revoke,confirm,
+2026-03-12T07:53:51.963558+00:00,CASE-0003,reviewer_1,revoke,override_revoke,revoke,override_revoke,
+2026-03-12T08:33:40.938274+00:00,CASE-0095,reviewer_1,revoke,confirm,revoke,confirm,
