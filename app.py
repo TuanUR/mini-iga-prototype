@@ -544,7 +544,7 @@ def render_timeline(case_row: pd.Series) -> None:
         showlegend=False,
     )
     fig.add_hline(y=0, line_width=1, line_color="#cccccc", line_dash="dot")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def build_case_scope(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> pd.DataFrame:
