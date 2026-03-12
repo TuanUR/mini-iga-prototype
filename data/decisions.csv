@@ -3,3 +3,8 @@ timestamp,case_id,reviewer,recommended,reviewer_decision,final_decision,action_t
 2026-03-12T07:53:29.068547+00:00,CASE-0005,reviewer_1,revoke,confirm,revoke,confirm,
 2026-03-12T07:53:51.963558+00:00,CASE-0003,reviewer_1,revoke,override_revoke,revoke,override_revoke,
 2026-03-12T08:33:40.938274+00:00,CASE-0095,reviewer_1,revoke,confirm,revoke,confirm,
+2026-03-12T17:06:43.155014+00:00,CASE-0091,reviewer_1,revoke,override_retain,retain,override_retain,
+2026-03-12T17:07:39.241164+00:00,CASE-0231,reviewer_1,review,override_revoke,revoke,override_revoke,
+2026-03-12T17:29:43.166381+00:00,CASE-0145,reviewer_1,revoke,override_retain,retain,override_retain,
+2026-03-12T17:30:02.146076+00:00,CASE-0092,reviewer_1,revoke,override_retain,retain,override_retain,
+2026-03-12T17:31:49.559084+00:00,CASE-0106,reviewer_1,revoke,escalate,escalate,escalated,

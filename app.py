@@ -119,7 +119,32 @@ def map_action_to_decision(action: str, recommendation_label: str) -> tuple[str,
     return "escalate", "escalate", "escalated"
 
 
-@st.dialog("Fall bearbeiten", width="large")
+def clear_case_dialog_state() -> None:
+    st.session_state.pop("edit_case_id", None)
+    st.session_state.pop("pending_case_decision", None)
+    active_case_id = str(st.session_state.get("worklist_selected_case_id", "")).strip()
+    if active_case_id:
+        st.session_state.pop(f"dialog_action_{active_case_id}", None)
+        st.session_state.pop(f"dialog_comment_{active_case_id}", None)
+
+
+def clear_confirm_dialog_state() -> None:
+    st.session_state.pop("confirm_case_id", None)
+    st.session_state.pop("pending_case_decision", None)
+
+
+def return_to_case_dialog_from_confirm() -> None:
+    pending = st.session_state.get("pending_case_decision")
+    case_id = ""
+    if isinstance(pending, dict):
+        case_id = str(pending.get("case_id", "")).strip()
+    st.session_state.pop("confirm_case_id", None)
+    st.session_state.pop("pending_case_decision", None)
+    if case_id:
+        st.session_state["edit_case_id"] = case_id
+
+
+@st.dialog("Fall bearbeiten", width="large", on_dismiss=clear_case_dialog_state)
 def render_case_edit_dialog(
     cases_df: pd.DataFrame, decisions_df: pd.DataFrame, case_id: str
 ) -> None:
@@ -238,6 +263,10 @@ def render_case_edit_dialog(
                         return
                 st.session_state["pending_case_decision"] = {
                     "case_id": str(case_row["case_id"]),
+                    "user_id": str(case_row["user_id"]),
+                    "application": str(case_row["application"]),
+                    "entitlement": str(case_row["entitlement"]),
+                    "recommendation_label": recommendation_label,
                     "entry": {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "case_id": case_row["case_id"],
@@ -249,55 +278,9 @@ def render_case_edit_dialog(
                         "comment": normalized_comment,
                     },
                 }
+                st.session_state["confirm_case_id"] = str(case_row["case_id"])
+                st.session_state.pop("edit_case_id", None)
                 st.rerun()
-
-            pending = st.session_state.get("pending_case_decision")
-            if isinstance(pending, dict) and pending.get("case_id") == str(case_row["case_id"]):
-                pending_entry = pending["entry"]
-                st.markdown("---")
-                st.write("**Bestätigung**")
-                st.write("Möchten Sie diese Entscheidung wirklich speichern?")
-                st.write(f"- Fall-ID: `{case_row['case_id']}`")
-                st.write(f"- Benutzer: `{case_row['user_id']}`")
-                st.write(f"- Anwendung: `{case_row['application']}`")
-                st.write(f"- Berechtigung: `{case_row['entitlement']}`")
-                st.write(f"- Aktuelle Empfehlung: `{recommendation_label}`")
-                st.write(f"- Neue Reviewer-Entscheidung: `{pending_entry['reviewer_decision']}`")
-                st.write(
-                    f"- Kommentar: `{pending_entry['comment'] if pending_entry['comment'] else '-'}`"
-                )
-                confirm_col, cancel_col = st.columns(2)
-                with confirm_col:
-                    if st.button("Fortfahren", type="primary", key=f"confirm_save_{case_id}"):
-                        save_result = save_decision(pending_entry)
-                        if save_result == "unchanged":
-                            st.warning("Keine Änderungen zum Speichern vorhanden.")
-                            st.session_state.pop("pending_case_decision", None)
-                            return
-                        if pending_entry["reviewer_decision"] == "escalate":
-                            st.session_state["decision_feedback"] = {
-                                "type": "warning",
-                                "text": "Der Fall wurde zur weiteren Prüfung eskaliert.",
-                            }
-                        elif save_result == "created":
-                            st.session_state["decision_feedback"] = {
-                                "type": "success",
-                                "text": "Entscheidung erfolgreich gespeichert.",
-                            }
-                        else:
-                            st.session_state["decision_feedback"] = {
-                                "type": "success",
-                                "text": "Entscheidung erfolgreich aktualisiert.",
-                            }
-                        st.session_state.pop("pending_case_decision", None)
-                        st.session_state.pop("edit_case_id", None)
-                        st.session_state.pop(action_key, None)
-                        st.session_state.pop(comment_key, None)
-                        st.rerun()
-                with cancel_col:
-                    if st.button("Abbrechen", key=f"cancel_save_{case_id}"):
-                        st.session_state.pop("pending_case_decision", None)
-                        st.rerun()
 
     with right_col:
         with st.expander("Abschnitt C: Beitrag einzelner Faktoren", expanded=True):
@@ -346,6 +329,66 @@ def render_case_edit_dialog(
 
         with st.expander("Abschnitt G: Zeitleiste / Zeitstrahl", expanded=False):
             render_timeline(case_row)
+
+
+@st.dialog("Entscheidung bestätigen", width="small", on_dismiss=return_to_case_dialog_from_confirm)
+def render_decision_confirm_dialog() -> None:
+    pending = st.session_state.get("pending_case_decision")
+    if not isinstance(pending, dict):
+        st.info("Keine ausstehende Entscheidung vorhanden.")
+        return
+
+    pending_entry = pending.get("entry", {})
+    if not isinstance(pending_entry, dict):
+        st.info("Keine ausstehende Entscheidung vorhanden.")
+        return
+
+    st.write("Möchten Sie diese Entscheidung wirklich speichern?")
+    st.write(f"- Fall-ID: `{pending.get('case_id', '-')}`")
+    st.write(f"- Benutzer: `{pending.get('user_id', '-')}`")
+    st.write(f"- Anwendung: `{pending.get('application', '-')}`")
+    st.write(f"- Berechtigung: `{pending.get('entitlement', '-')}`")
+    st.write(f"- Aktuelle Empfehlung: `{pending.get('recommendation_label', '-')}`")
+    st.write(f"- Neue Reviewer-Entscheidung: `{pending_entry.get('reviewer_decision', '-')}`")
+    st.write(f"- Kommentar: `{pending_entry.get('comment', '') or '-'}`")
+
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        if st.button("Bestätigen", type="primary", key="confirm_save_decision"):
+            save_result = save_decision(pending_entry)
+            if save_result == "unchanged":
+                st.session_state["decision_feedback"] = {
+                    "type": "warning",
+                    "text": "Keine Änderungen zum Speichern vorhanden.",
+                }
+            elif str(pending_entry.get("reviewer_decision", "")) == "escalate":
+                st.session_state["decision_feedback"] = {
+                    "type": "warning",
+                    "text": "Der Fall wurde zur weiteren Prüfung eskaliert.",
+                }
+            elif save_result == "created":
+                st.session_state["decision_feedback"] = {
+                    "type": "success",
+                    "text": "Entscheidung erfolgreich gespeichert.",
+                }
+            else:
+                st.session_state["decision_feedback"] = {
+                    "type": "success",
+                    "text": "Entscheidung erfolgreich aktualisiert.",
+                }
+
+            case_id = str(pending.get("case_id", "")).strip()
+            if case_id:
+                st.session_state.pop(f"dialog_action_{case_id}", None)
+                st.session_state.pop(f"dialog_comment_{case_id}", None)
+            clear_confirm_dialog_state()
+            st.session_state["force_case_review_tab"] = True
+            st.rerun()
+    with cancel_col:
+        if st.button("Abbrechen", key="cancel_save_decision"):
+            return_to_case_dialog_from_confirm()
+            st.session_state["force_case_review_tab"] = True
+            st.rerun()
 
 
 def load_evaluations(path: Path) -> pd.DataFrame:
@@ -686,6 +729,12 @@ def build_worklist_table(cases_df: pd.DataFrame) -> pd.DataFrame:
         ]
     ].copy()
     table_df = table_df.rename(columns={"user_id": "user_name"})
+    status_labels = {
+        "open": "🟡 Offen",
+        "decided": "✅ Entschieden",
+        "escalated": "🚨 Eskaliert",
+    }
+    table_df["case_status"] = table_df["case_status"].map(status_labels).fillna("🟡 Offen")
     table_df = table_df.sort_values("recommendation_score", ascending=False).reset_index(drop=True)
     return table_df
 
@@ -1056,48 +1105,10 @@ def render_overview(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None:
 
     st.markdown("### Review-Fälle im aktuellen Filterkontext")
     st.caption(
-        "Die Tabelle zeigt alle aktuell gefilterten Fälle. Nutzen Sie die Übersicht zur Priorisierung und wechseln Sie anschließend in die Fallansicht, um einzelne Fälle im Detail zu prüfen."
+        "Die Tabelle zeigt alle aktuell gefilterten Fälle. Die Auswahl und Bearbeitung einzelner Fälle erfolgt im Tab „Fallprüfung“."
     )
     worklist_df = build_worklist_table(cases_df)
-    selection_event = st.dataframe(
-        worklist_df,
-        width="stretch",
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key="overview_worklist_table",
-    )
-
-    selected_case_id = extract_single_selected_case_id(
-        selection_event=selection_event,
-        table_df=worklist_df,
-        widget_key="overview_worklist_table",
-    )
-    valid_case_ids = set(cases_df["case_id"].astype(str))
-
-    if selected_case_id is None:
-        st.session_state.pop("worklist_selected_case_id", None)
-        if str(st.session_state.get("edit_case_id", "")) not in valid_case_ids:
-            st.session_state.pop("edit_case_id", None)
-        st.info("Bitte wählen Sie einen Fall aus der Tabelle aus.")
-        return
-
-    st.session_state["worklist_selected_case_id"] = selected_case_id
-    selected_case = cases_df.loc[cases_df["case_id"].astype(str) == selected_case_id].iloc[0]
-
-    st.markdown("#### Ausgewählter Fall")
-    st.write(f"- Fall-ID: `{selected_case['case_id']}`")
-    st.write(f"- Benutzer: `{selected_case['user_id']}`")
-    st.write(f"- Anwendung: `{selected_case['application']}`")
-    st.write(f"- Berechtigung: `{selected_case['entitlement']}`")
-    st.write(f"- Empfehlung: `{selected_case['recommendation_label']}`")
-
-    if st.button("Fall bearbeiten", type="primary", key=f"overview_edit_case_btn_{selected_case_id}"):
-        st.session_state["edit_case_id"] = selected_case_id
-
-    edit_case_id = str(st.session_state.get("edit_case_id", ""))
-    if edit_case_id in valid_case_ids:
-        render_case_edit_dialog(cases_df, decisions_df, edit_case_id)
+    st.dataframe(worklist_df, width="stretch", hide_index=True)
 
 
 def render_heatmap(cases_df: pd.DataFrame) -> None:
@@ -1288,7 +1299,7 @@ def render_heatmap(cases_df: pd.DataFrame) -> None:
 def render_case_view(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None:
     st.subheader("Fallprüfung")
     st.caption(
-        "Details on demand: Wählen Sie zuerst einen Fall in der Übersicht aus und öffnen Sie anschließend den Bearbeitungsdialog."
+        "Details on demand: Wählen Sie einen Fall aus der Tabelle und öffnen Sie anschließend den Bearbeitungsdialog."
     )
 
     if len(cases_df) == 0:
@@ -1305,33 +1316,40 @@ def render_case_view(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None
         else:
             st.success(str(feedback.get("text", "")))
 
+    worklist_df = build_worklist_table(cases_df)
+    selection_event = st.dataframe(
+        worklist_df,
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="case_review_worklist_table",
+    )
+    selected_case_id = extract_single_selected_case_id(
+        selection_event=selection_event,
+        table_df=worklist_df,
+        widget_key="case_review_worklist_table",
+    )
     valid_case_ids = set(cases_df["case_id"].astype(str))
-    selected_case_id = str(st.session_state.get("worklist_selected_case_id", ""))
-    if selected_case_id not in valid_case_ids:
-        st.session_state.pop("worklist_selected_case_id", None)
-        selected_case_id = ""
 
-    if selected_case_id == "":
-        st.info("Bitte wählen Sie in der Übersicht einen Fall aus der Worklist aus.")
+    has_selection = selected_case_id is not None
+    button_clicked = st.button(
+        "Fall bearbeiten",
+        type="primary" if has_selection else "secondary",
+        key="case_view_edit_case_btn",
+    )
+
+    if not has_selection:
+        st.session_state.pop("worklist_selected_case_id", None)
         if str(st.session_state.get("edit_case_id", "")) not in valid_case_ids:
             st.session_state.pop("edit_case_id", None)
+        if button_clicked:
+            st.info("Bitte treffen Sie eine Auswahl")
         return
 
-    selected_case = cases_df.loc[cases_df["case_id"].astype(str) == selected_case_id].iloc[0]
-
-    st.markdown("#### Ausgewählter Fall")
-    st.write(f"- Fall-ID: `{selected_case['case_id']}`")
-    st.write(f"- Benutzer: `{selected_case['user_id']}`")
-    st.write(f"- Anwendung: `{selected_case['application']}`")
-    st.write(f"- Berechtigung: `{selected_case['entitlement']}`")
-    st.write(f"- Empfehlung: `{selected_case['recommendation_label']}`")
-
-    if st.button("Fall bearbeiten", type="primary", key=f"case_view_edit_case_btn_{selected_case_id}"):
-        st.session_state["edit_case_id"] = selected_case_id
-
-    edit_case_id = str(st.session_state.get("edit_case_id", ""))
-    if edit_case_id in valid_case_ids:
-        render_case_edit_dialog(cases_df, decisions_df, edit_case_id)
+    st.session_state["worklist_selected_case_id"] = str(selected_case_id)
+    if button_clicked:
+        st.session_state["edit_case_id"] = str(selected_case_id)
 
 
 def render_audit_log(
@@ -1434,21 +1452,36 @@ def render_evaluation_mode() -> None:
         st.success("Evaluation gespeichert.")
 
 
+def inject_dialog_width_css() -> None:
+    if st.session_state.get("confirm_case_id"):
+        st.markdown(
+            """
+            <style>
+            div[role="dialog"][aria-modal="true"] {
+                width: min(92vw, 460px) !important;
+                max-width: 460px !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif st.session_state.get("edit_case_id"):
+        st.markdown(
+            """
+            <style>
+            div[role="dialog"][aria-modal="true"] {
+                width: min(96vw, 1500px) !important;
+                max-width: 1500px !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def main() -> None:
     st.set_page_config(page_title="Mini IGA Access Review", layout="wide")
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stDialog"] div[role="dialog"],
-        section[data-testid="stDialog"] div[role="dialog"],
-        div[role="dialog"][aria-modal="true"] {
-            width: min(96vw, 1800px) !important;
-            max-width: 1800px !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    inject_dialog_width_css()
     st.title("Mini IGA Access Review Prototype")
     st.info(
         "Start with the overview, narrow down with filters, inspect a selected case in detail."
@@ -1468,21 +1501,35 @@ def main() -> None:
         decisions_df["case_id"].astype(str).isin(filtered_case_ids)
     ]
 
-    tab_overview, tab_structure, tab_case_review, tab_audit = st.tabs(
-        ["Übersicht", "Struktur", "Fallprüfung", "Audit Log"]
-    )
-    with tab_overview:
+    tab_labels = ["Übersicht", "Struktur", "Fallprüfung", "Audit Log"]
+    if (
+        st.session_state.get("confirm_case_id")
+        or st.session_state.get("edit_case_id")
+        or st.session_state.get("force_case_review_tab")
+    ):
+        tab_labels = ["Fallprüfung", "Übersicht", "Struktur", "Audit Log"]
+
+    tab_containers = st.tabs(tab_labels)
+    tabs_by_label = dict(zip(tab_labels, tab_containers))
+
+    with tabs_by_label["Übersicht"]:
         render_overview(filtered_scope_df, filtered_decisions_df)
-    with tab_structure:
+    with tabs_by_label["Struktur"]:
         render_heatmap(filtered_scope_df)
-    with tab_case_review:
+    with tabs_by_label["Fallprüfung"]:
         render_case_view(filtered_scope_df, decisions_df)
-    with tab_audit:
+    with tabs_by_label["Audit Log"]:
         render_audit_log(decisions_df, filtered_scope_df, filtered_case_ids)
 
-    st.divider()
-    render_evaluation_mode()
+    confirm_case_id = str(st.session_state.get("confirm_case_id", "")).strip()
+    edit_case_id = str(st.session_state.get("edit_case_id", "")).strip()
+    if confirm_case_id:
+        render_decision_confirm_dialog()
+    elif edit_case_id:
+        render_case_edit_dialog(filtered_scope_df, decisions_df, edit_case_id)
 
+    if st.session_state.get("force_case_review_tab") and not confirm_case_id and not edit_case_id:
+        st.session_state.pop("force_case_review_tab", None)
 
 if __name__ == "__main__":
     main()
