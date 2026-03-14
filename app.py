@@ -3170,8 +3170,9 @@ def render_case_view(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None
         "Ein Fall entspricht einer konkreten Nutzer-Berechtigungs-Zuweisung, die im Rahmen der Rezertifizierung geprüft wird."
     )
 
-    if not st.session_state.get("active_participant_id", "").strip():
-        st.warning("Bitte geben Sie in der Sidebar Ihre Teilnehmer-ID ein, damit Ihre Entscheidungen korrekt zugeordnet werden.")
+    if not st.session_state.get("participant_id_locked", False) or not st.session_state.get("active_participant_id", "").strip():
+        st.warning("Bitte bestätigen Sie zuerst Ihre Teilnehmer-ID in der Sidebar, bevor Sie Fälle bearbeiten können.")
+        return
 
     if len(cases_df) == 0:
         st.warning("Keine Fälle im aktuellen Filterkontext.")
@@ -3420,9 +3421,9 @@ def render_evaluation_mode() -> None:
         st.success(str(reset_feedback))
 
     participant_id = st.session_state.get("active_participant_id", "").strip()
-    if not participant_id:
+    if not st.session_state.get("participant_id_locked", False) or not participant_id:
         st.warning(
-            "Bitte geben Sie zuerst Ihre Teilnehmer-ID in der Sidebar ein, "
+            "Bitte bestätigen Sie zuerst Ihre Teilnehmer-ID in der Sidebar, "
             "bevor Sie die Evaluation ausfüllen."
         )
         return
