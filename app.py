@@ -16,45 +16,53 @@ except Exception:
 from scoring import compute_confidence, evaluate_case
 
 # ---------------------------------------------------------------------------
-# Google Sheets persistence layer
+# Google Sheets persistence layer (cached connection + cached reads)
 # ---------------------------------------------------------------------------
-_gsheets_available = False
-_gsheets_client = None
-_gsheets_spreadsheet = None
 
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
+@st.cache_resource(show_spinner=False)
+def _get_gsheets_spreadsheet():
+    """Authorize and open the Google Sheet once, then cache the connection."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
 
-    if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
-        _SCOPES = [
+        if not hasattr(st, "secrets") or "gcp_service_account" not in st.secrets:
+            return None
+        scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
-        _creds = Credentials.from_service_account_info(
-            dict(st.secrets["gcp_service_account"]), scopes=_SCOPES
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=scopes
         )
-        _gsheets_client = gspread.authorize(_creds)
-        _sheet_url = st.secrets.get("google_sheets", {}).get("spreadsheet_url", "")
-        if _sheet_url:
-            _gsheets_spreadsheet = _gsheets_client.open_by_url(_sheet_url)
-            _gsheets_available = True
-except Exception:
-    _gsheets_available = False
+        client = gspread.authorize(creds)
+        sheet_url = st.secrets.get("google_sheets", {}).get("spreadsheet_url", "")
+        if not sheet_url:
+            return None
+        return client.open_by_url(sheet_url)
+    except Exception:
+        return None
 
 
 def _gsheet_worksheet(name: str):
     """Get or create a worksheet by name."""
-    if not _gsheets_available or _gsheets_spreadsheet is None:
+    spreadsheet = _get_gsheets_spreadsheet()
+    if spreadsheet is None:
         return None
     try:
-        return _gsheets_spreadsheet.worksheet(name)
-    except gspread.exceptions.WorksheetNotFound:
-        return _gsheets_spreadsheet.add_worksheet(title=name, rows=1000, cols=30)
+        import gspread
+        return spreadsheet.worksheet(name)
+    except Exception:
+        try:
+            return spreadsheet.add_worksheet(title=name, rows=1000, cols=30)
+        except Exception:
+            return None
 
 
-def _gsheet_read(sheet_name: str, columns: list[str]) -> pd.DataFrame | None:
-    """Read all rows from a Google Sheet worksheet into a DataFrame."""
+@st.cache_data(ttl=30, show_spinner=False)
+def _gsheet_read_cached(sheet_name: str, _columns_tuple: tuple) -> pd.DataFrame | None:
+    """Read all rows from a Google Sheet — cached for 30s to avoid API spam."""
+    columns = list(_columns_tuple)
     ws = _gsheet_worksheet(sheet_name)
     if ws is None:
         return None
@@ -71,6 +79,16 @@ def _gsheet_read(sheet_name: str, columns: list[str]) -> pd.DataFrame | None:
         return None
 
 
+def _gsheet_read(sheet_name: str, columns: list[str]) -> pd.DataFrame | None:
+    """Wrapper that converts columns list to tuple for cache key."""
+    return _gsheet_read_cached(sheet_name, tuple(columns))
+
+
+def _gsheet_invalidate_read_cache() -> None:
+    """Clear the read cache after a write operation."""
+    _gsheet_read_cached.clear()
+
+
 def _gsheet_overwrite(sheet_name: str, df: pd.DataFrame, columns: list[str]) -> bool:
     """Overwrite a Google Sheet worksheet with a DataFrame (header + data)."""
     ws = _gsheet_worksheet(sheet_name)
@@ -84,6 +102,7 @@ def _gsheet_overwrite(sheet_name: str, df: pd.DataFrame, columns: list[str]) -> 
             write_df = df[columns].fillna("").copy()
             rows = [columns] + write_df.astype(str).values.tolist()
             ws.update(rows, value_input_option="RAW")
+        _gsheet_invalidate_read_cache()
         return True
     except Exception:
         return False
@@ -95,12 +114,12 @@ def _gsheet_append_row(sheet_name: str, entry: dict, columns: list[str]) -> bool
     if ws is None:
         return False
     try:
-        # Ensure header exists
         existing = ws.get_all_values()
         if not existing:
             ws.append_row(columns)
         row = [str(entry.get(col, "")) for col in columns]
         ws.append_row(row, value_input_option="RAW")
+        _gsheet_invalidate_read_cache()
         return True
     except Exception:
         return False
