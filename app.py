@@ -3788,11 +3788,23 @@ def main() -> None:
         if pid_clean and not pid_valid:
             st.sidebar.error("Ungültiges Format. Bitte P- gefolgt von 3 Ziffern eingeben (z. B. P-001).")
         elif pid_valid:
-            st.sidebar.info(f"ID: **{pid_clean}** — bitte bestätigen.")
-            if st.sidebar.button("ID bestätigen und sperren", key="confirm_pid_btn", type="primary"):
-                st.session_state["active_participant_id"] = pid_clean
-                st.session_state["participant_id_locked"] = True
-                st.rerun()
+            # Check if ID already has an evaluation entry
+            existing_evals = load_evaluations(EVALUATION_PATH)
+            pid_already_used = (
+                len(existing_evals) > 0
+                and (existing_evals["participant_id"].astype(str).str.strip() == pid_clean).any()
+            )
+            if pid_already_used:
+                st.sidebar.error(
+                    f"Die ID **{pid_clean}** wurde bereits für eine abgeschlossene Evaluation verwendet. "
+                    "Bitte verwenden Sie eine andere ID."
+                )
+            else:
+                st.sidebar.info(f"ID: **{pid_clean}** — bitte bestätigen.")
+                if st.sidebar.button("ID bestätigen und sperren", key="confirm_pid_btn", type="primary"):
+                    st.session_state["active_participant_id"] = pid_clean
+                    st.session_state["participant_id_locked"] = True
+                    st.rerun()
         else:
             st.sidebar.warning("Bitte Teilnehmer-ID eingeben, um Entscheidungen zu speichern.")
     st.sidebar.divider()
