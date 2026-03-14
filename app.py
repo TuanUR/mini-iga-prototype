@@ -3758,19 +3758,42 @@ def main() -> None:
     st.sidebar.markdown("### Teilnehmer-Session")
     if "active_participant_id" not in st.session_state:
         st.session_state["active_participant_id"] = ""
-    participant_input = st.sidebar.text_input(
-        "Teilnehmer-ID",
-        value=st.session_state.get("active_participant_id", ""),
-        placeholder="z. B. P-001",
-        key="sidebar_participant_id_input",
-        help="Ihre Teilnehmer-ID wird für alle Entscheidungen und die Evaluation verwendet.",
-    )
-    participant_id_clean = participant_input.strip()
-    if participant_id_clean:
-        st.session_state["active_participant_id"] = participant_id_clean
-        st.sidebar.success(f"Aktiv: **{participant_id_clean}**")
+    if "participant_id_locked" not in st.session_state:
+        st.session_state["participant_id_locked"] = False
+
+    locked = st.session_state["participant_id_locked"]
+    current_pid = st.session_state.get("active_participant_id", "")
+
+    if locked and current_pid:
+        # --- Locked state: show confirmed ID ---
+        st.sidebar.success(f"Aktiv: **{current_pid}**")
+        st.sidebar.caption("Die Teilnehmer-ID ist für diese Sitzung gesperrt.")
     else:
-        st.sidebar.warning("Bitte Teilnehmer-ID eingeben, um Entscheidungen zu speichern.")
+        # --- Input state: require valid format ---
+        participant_input = st.sidebar.text_input(
+            "Teilnehmer-ID",
+            value=current_pid,
+            placeholder="z. B. P-001",
+            key="sidebar_participant_id_input",
+            help="Format: P- gefolgt von 3 Ziffern (z. B. P-001). Nach Bestätigung nicht mehr änderbar.",
+            max_chars=5,
+        )
+        pid_clean = participant_input.strip().upper()
+
+        # Validate format: P-XXX where X is digit
+        import re as _re_pid
+        pid_valid = bool(_re_pid.match(r"^P-\d{3}$", pid_clean))
+
+        if pid_clean and not pid_valid:
+            st.sidebar.error("Ungültiges Format. Bitte P- gefolgt von 3 Ziffern eingeben (z. B. P-001).")
+        elif pid_valid:
+            st.sidebar.info(f"ID: **{pid_clean}** — bitte bestätigen.")
+            if st.sidebar.button("ID bestätigen und sperren", key="confirm_pid_btn", type="primary"):
+                st.session_state["active_participant_id"] = pid_clean
+                st.session_state["participant_id_locked"] = True
+                st.rerun()
+        else:
+            st.sidebar.warning("Bitte Teilnehmer-ID eingeben, um Entscheidungen zu speichern.")
     st.sidebar.divider()
 
     seed_demo_decisions()
