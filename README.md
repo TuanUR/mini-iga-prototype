@@ -1,91 +1,172 @@
-# Mini IGA Prototype (Streamlit)
+# VA-IGA: Visual Analytics für Berechtigungsrezertifizierung
 
-Minimaler Masterarbeits-Prototyp für **Identity Governance and Administration (IGA)** mit Fokus auf **Access Review / Rezertifizierung** und rein lokalen, synthetischen Daten.
+> Prototyp zur Masterarbeit *„Visual Analytics für Identity and Access Management im Zeitalter von KI – State of the Art und Weiterentwicklung des Status Quo"*
+>
+> Tuan Kiet Nguyen · Universität Regensburg · Lehrstuhl WI I (Prof. Pernul) · 2026
 
-## Features
+---
 
-- Generierung synthetischer Review-Fälle
-- Transparente, gewichtete Regel-Logik für Empfehlungen (zentral in `scoring.py`):
-  - `retain`
-  - `review`
-  - `revoke`
-- KPI-Overview und Verteilung der Empfehlungen
-- Heatmap:
-  - `Department x Application` oder
-  - `Role x Entitlement`
-- Fallansicht mit lokaler Erklärung (Score + Regelbeiträge)
-- Ergänzter Governance-Fallkontext in der Fallprüfung:
-  - `business_need`
-  - `entitlement_owner`
-  - `manager_name`
-  - `assignment_type` (`Direct` / `Role-derived`)
-  - `source_role`
-  - `effective_permission`
-- Entscheidungs-Workflow: Confirm / Override / Comment
-- Audit Log als CSV (`data/decisions.csv`)
+## Übersicht
+
+Dieses Repository enthält einen Streamlit-basierten Prototyp, der Visual-Analytics-Prinzipien auf den Use Case der **Zugangsrezertifizierung** (Access Certification) im Identity and Access Management (IAM) anwendet. Ein regelbasiertes Scoring-Modell generiert KI-Empfehlungen für 240 synthetische Rezertifizierungsfälle; ein interaktives Dashboard unterstützt Reviewer bei der Prüfung, Erklärung und Dokumentation ihrer Entscheidungen.
+
+### Vier-Sichten-Architektur
+
+| Sicht | Tab | Funktion |
+|-------|-----|----------|
+| **Sicht 1** | Übersicht | KPIs, Verteilungsdiagramme, filterbare Falltabelle |
+| **Sicht 2** | Struktur | Heatmap (Abteilung × Anwendung / Rolle × Berechtigung) mit Drill-Down |
+| **Sicht 3** | Fallprüfung | XAI-Faktordiagramm, Peer-Group-Vergleich, Berechtigungshistorie, Entscheidungsworkflow |
+| **Sicht 4** | Audit Log | Vollständige Entscheidungshistorie mit Versioning, Override-Rate, CSV-Export |
+
+Ein fünfter Tab (**Evaluation**) enthält einen integrierten Fragebogen mit Reflexionsfragen und Likert-Items für die formative Evaluation.
+
+---
 
 ## Projektstruktur
 
-- `requirements.txt`
-- `scoring.py` (gemeinsame Scoring- und Confidence-Logik für Generator + UI)
-- `generate_data.py`
-- `app.py`
-- `data/review_cases.csv`
-- `data/decisions.csv`
+```
+├── app.py                  # Hauptanwendung (Streamlit)
+├── scoring.py              # Regelbasiertes Scoring-Modell (7 Faktorkategorien)
+├── generate_data.py        # Synthetische Datengenerierung (240 Fälle)
+├── data/
+│   ├── review_cases.csv    # Falldatensatz (generiert durch generate_data.py)
+│   ├── decisions.csv       # Entscheidungsprotokoll (Audit Trail)
+│   └── evaluation_log.csv  # Evaluationsergebnisse
+├── requirements.txt        # Python-Abhängigkeiten
+└── README.md
+```
 
-## Setup
+---
+
+## Lokale Installation
+
+### Voraussetzungen
+
+- Python 3.10+
+- pip
+
+### Setup
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+# Repository klonen
+git clone https://github.com/<user>/<repo>.git
+cd <repo>
+
+# Abhängigkeiten installieren
 pip install -r requirements.txt
-```
 
-## Daten generieren
-
-```bash
+# Synthetische Daten generieren
 python generate_data.py
-```
 
-## App starten
-
-```bash
+# Prototyp starten
 streamlit run app.py
 ```
 
-Danach im Browser die angezeigte lokale URL öffnen.
+Die Anwendung öffnet sich unter `http://localhost:8501`.
 
-## Regel-Logik (kurz)
+---
 
-Die Empfehlung entsteht über additive Gewichte, u. a. für:
+## Deployment (Streamlit Community Cloud)
 
-- Inaktivität (`last_login_days`)
-- veraltete Berechtigung (`stale_access_days`)
-- Privilegstufe (`privilege_level`)
-- toxische Kombination (`toxic_combo`)
-- sensible Rollen (`Admin`, `Contractor`)
+Die Anwendung ist für das Deployment auf [Streamlit Community Cloud](https://share.streamlit.io/) konfiguriert.
 
-Zusätzlich werden entlastende Faktoren mit negativen Beiträgen berücksichtigt, z. B.:
+### Google Sheets Persistenz
 
-- sehr aktuelle Nutzung
-- kürzlich genutzte Berechtigung
-- niedriges Privileg
-- kein SoD-Konflikt
-- aktiver Benutzer
-- kein Abteilungswechsel
+Auf Streamlit Community Cloud ist das Dateisystem ephemer. Entscheidungen und Evaluationen werden daher in einem Google Sheet persistiert. Für lokale Nutzung ist dies optional – die App fällt automatisch auf lokale CSV-Dateien zurück.
 
-Die Logik wird einmalig in `scoring.py` definiert.  
-`evaluate_case(...)` ist der zentrale Einstiegspunkt und wird sowohl vom Datengenerator (`generate_data.py`) als auch von der UI-Erklärung (`app.py`) direkt verwendet.
-`weighted_recommendation(...)` bleibt als kompatibler Wrapper erhalten.
+**Einrichtung:**
 
-Schwellenwerte:
+1. Google Cloud Projekt mit aktivierter **Sheets API** und **Drive API** erstellen
+2. Service Account mit JSON-Key erstellen
+3. Google Sheet anlegen und mit der Service-Account-E-Mail als Editor teilen
+4. In Streamlit Cloud → App Settings → Secrets eintragen:
 
-- `score < 35` -> `retain`
-- `35 <= score < 70` -> `review`
-- `score >= 70` -> `revoke`
+```toml
+[gcp_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "...@....iam.gserviceaccount.com"
+client_id = "..."
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
 
-## Hinweise
+[google_sheets]
+spreadsheet_url = "https://docs.google.com/spreadsheets/d/SHEET_ID/edit"
+```
 
-- Keine externe Datenbank
-- Keine API-Anbindung
-- Alles lokal lauffähig
+Die Tabellenblätter `decisions` und `evaluation_log` werden automatisch erstellt.
+
+---
+
+## Scoring-Modell
+
+Das regelbasierte Scoring-Modell (`scoring.py`) berechnet einen Risiko-Score aus sieben Faktorkategorien:
+
+| Kategorie | Risikoerhöhend | Risikosenkend |
+|-----------|---------------|---------------|
+| Login-Aktivität | Inaktiv > 120 Tage: +35 | Aktiv ≤ 7 Tage: −15 |
+| Zuweisungsaktualität | Unbenutzt > 365 Tage: +30 | Kürzlich genutzt: −12 |
+| Privilegstufe | Hoch: +25 | Niedrig: −10 |
+| SoD-Konflikt | Toxic Combination: +40 | Kein Konflikt: −15 |
+| Rolle | Admin/Contractor: +10 | — |
+| Abteilungswechsel | Privilege Creep: +15 | Kein Wechsel: −5 |
+| Benutzerstatus | Terminated: +30 | Aktiv: −5 |
+
+**Empfehlungsschwellen:** Score ≥ 70 → Entziehen · 35–69 → Prüfen · < 35 → Beibehalten
+
+---
+
+## Evaluationskonzept
+
+Die Evaluation folgt dem FEDS-Framework (Venable et al., 2016) als **formative, artifizielle** Evaluations-Episode:
+
+- **Methodik:** Asynchroner Self-Guided Expert Walkthrough
+- **Teilnehmer:** 2–3 Domänenexperten (Convenience Sampling)
+- **Instrumente:** 3 zielorientierte Aufgaben, strukturierte Reflexionsfragen, 5 Likert-Items, offene Kommentare
+- **Persistenz:** Alle Eingaben werden pro Teilnehmer-ID im Prototyp gespeichert
+
+### Teilnehmer-ID
+
+Beim Start muss eine Teilnehmer-ID im Format `P-XXX` (z. B. P-001) eingegeben und bestätigt werden. Die ID wird für die gesamte Sitzung gesperrt und dient als Zuordnungsschlüssel für Entscheidungen und Evaluationsdaten.
+
+---
+
+## Audit Trail
+
+Jede Entscheidung wird als neue Zeile protokolliert – auch Revisionen. Das Audit Log zeigt die vollständige Versionshistorie mit:
+
+- **Version** (v1, v2, ...) mit Status (aktuell / revidiert)
+- **Reviewer** (Teilnehmer-ID)
+- **Zeitstempel**, KI-Empfehlung, Aktion, finale Entscheidung, Kommentar
+- **Override-Markierung** bei Abweichung von der KI-Empfehlung
+
+---
+
+## Design Requirements
+
+| DR | Beschreibung | Umsetzung |
+|----|-------------|-----------|
+| DR1 | Shneiderman-konformer Informationszugang | Übersicht → Heatmap → Fallprüfung + globale Filter |
+| DR2 | Integration von ML-Empfehlungen | KI-Empfehlung mit Score, Konfidenz und Entscheidungsworkflow |
+| DR3 | Post-hoc-Erklärbarkeit | Divergierendes Faktordiagramm (SHAP-artig) |
+| DR4 | Kontextualisierung | Peer-Group-Vergleich + Berechtigungshistorie (Zeitstrahl) |
+| DR5 | Auditierbare Entscheidungsdokumentation | Audit Trail mit Versioning und CSV-Export |
+
+---
+
+## Technologie-Stack
+
+- **Frontend:** [Streamlit](https://streamlit.io/)
+- **Visualisierung:** [Plotly](https://plotly.com/python/) (Express + Graph Objects)
+- **Datenverarbeitung:** [pandas](https://pandas.pydata.org/)
+- **Persistenz:** CSV (lokal) / [Google Sheets](https://developers.google.com/sheets/api) (Cloud)
+- **Authentifizierung:** [gspread](https://docs.gspread.org/) + Google Service Account
+
+---
+
+## Lizenz
+
+Dieses Projekt wurde im Rahmen einer Masterarbeit an der Universität Regensburg erstellt und dient ausschließlich akademischen Zwecken.
