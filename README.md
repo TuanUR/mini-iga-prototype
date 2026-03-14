@@ -1,8 +1,6 @@
 # VA-IGA: Visual Analytics für Berechtigungsrezertifizierung
 
-> Prototyp zur Masterarbeit *„Visual Analytics für Identity and Access Management im Zeitalter von KI – State of the Art und Weiterentwicklung des Status Quo"*
->
-> Tuan Kiet Nguyen · Universität Regensburg · Lehrstuhl WI I (Prof. Pernul) · 2026
+Prototyp zur Masterarbeit *„Visual Analytics für Identity and Access Management im Zeitalter von KI – State of the Art und Weiterentwicklung des Status Quo"*
 
 ---
 
