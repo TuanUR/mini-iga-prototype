@@ -2870,7 +2870,7 @@ def render_heatmap(cases_df: pd.DataFrame) -> None:
         heatmap_zmid = None
     else:
         heatmap_colorscale = [
-            [0.0, "#4e79a7"],   # kühl, negative Werte
+            [0.0, "#2e7d32"],   # grün, negative Werte
             [0.5, "#f5f5f5"],   # neutral um 0
             [1.0, "#e07a2d"],   # warm, positive Werte
         ]
