@@ -15,6 +15,96 @@ except Exception:
 
 from scoring import compute_confidence, evaluate_case
 
+# ---------------------------------------------------------------------------
+# Google Sheets persistence layer
+# ---------------------------------------------------------------------------
+_gsheets_available = False
+_gsheets_client = None
+_gsheets_spreadsheet = None
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
+        _SCOPES = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        _creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=_SCOPES
+        )
+        _gsheets_client = gspread.authorize(_creds)
+        _sheet_url = st.secrets.get("google_sheets", {}).get("spreadsheet_url", "")
+        if _sheet_url:
+            _gsheets_spreadsheet = _gsheets_client.open_by_url(_sheet_url)
+            _gsheets_available = True
+except Exception:
+    _gsheets_available = False
+
+
+def _gsheet_worksheet(name: str):
+    """Get or create a worksheet by name."""
+    if not _gsheets_available or _gsheets_spreadsheet is None:
+        return None
+    try:
+        return _gsheets_spreadsheet.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        return _gsheets_spreadsheet.add_worksheet(title=name, rows=1000, cols=30)
+
+
+def _gsheet_read(sheet_name: str, columns: list[str]) -> pd.DataFrame | None:
+    """Read all rows from a Google Sheet worksheet into a DataFrame."""
+    ws = _gsheet_worksheet(sheet_name)
+    if ws is None:
+        return None
+    try:
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=columns)
+        df = pd.DataFrame(data)
+        for col in columns:
+            if col not in df.columns:
+                df[col] = ""
+        return df[columns].copy()
+    except Exception:
+        return None
+
+
+def _gsheet_overwrite(sheet_name: str, df: pd.DataFrame, columns: list[str]) -> bool:
+    """Overwrite a Google Sheet worksheet with a DataFrame (header + data)."""
+    ws = _gsheet_worksheet(sheet_name)
+    if ws is None:
+        return False
+    try:
+        ws.clear()
+        if len(df) == 0:
+            ws.append_row(columns)
+        else:
+            write_df = df[columns].fillna("").copy()
+            rows = [columns] + write_df.astype(str).values.tolist()
+            ws.update(rows, value_input_option="RAW")
+        return True
+    except Exception:
+        return False
+
+
+def _gsheet_append_row(sheet_name: str, entry: dict, columns: list[str]) -> bool:
+    """Append a single row to a Google Sheet worksheet."""
+    ws = _gsheet_worksheet(sheet_name)
+    if ws is None:
+        return False
+    try:
+        # Ensure header exists
+        existing = ws.get_all_values()
+        if not existing:
+            ws.append_row(columns)
+        row = [str(entry.get(col, "")) for col in columns]
+        ws.append_row(row, value_input_option="RAW")
+        return True
+    except Exception:
+        return False
+
 DATA_DIR = Path("data")
 CASES_PATH = DATA_DIR / "review_cases.csv"
 DECISIONS_PATH = DATA_DIR / "decisions.csv"
@@ -36,12 +126,21 @@ EVALUATION_COLUMNS = [
     "task_1_completed",
     "task_2_completed",
     "task_3_completed",
+    "reflect_task1",
+    "reflect_task1_dept",
+    "reflect_task2_explanation",
+    "reflect_task2_components",
+    "reflect_task2_component_feedback",
+    "reflect_task3_own_decision",
+    "reflect_task3_override",
     "likert_q1",
     "likert_q2",
     "likert_q3",
     "likert_q4",
     "likert_q5",
     "comment",
+    "iam_experience",
+    "professional_background",
 ]
 MISSING_TEXT_VALUES = {"", "nan", "nat", "none", "null"}
 
@@ -73,10 +172,15 @@ def ensure_decision_schema(decisions_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_decisions(path: Path) -> pd.DataFrame:
-    if not path.exists():
+    # Try Google Sheets first
+    gsheet_df = _gsheet_read("decisions", DECISION_COLUMNS)
+    if gsheet_df is not None:
+        raw_df = gsheet_df
+    elif not path.exists():
         return pd.DataFrame(columns=DECISION_COLUMNS)
+    else:
+        raw_df = pd.read_csv(path)
 
-    raw_df = pd.read_csv(path)
     schema_changed = list(raw_df.columns) != DECISION_COLUMNS
     decisions_df = ensure_decision_schema(raw_df)
     decisions_df["recommended"] = decisions_df["recommended"].fillna("").astype(str)
@@ -129,6 +233,7 @@ def load_decisions(path: Path) -> pd.DataFrame:
     )
     if schema_changed or len(normalized) != len(decisions_df):
         normalized.to_csv(path, index=False)
+        _gsheet_overwrite("decisions", normalized, DECISION_COLUMNS)
     return normalized
 
 
@@ -180,6 +285,7 @@ def save_decision(entry: dict) -> str:
         updated_df = pd.concat([decisions_df, pd.DataFrame([entry])], ignore_index=True)
         updated_df = updated_df[DECISION_COLUMNS].copy()
         updated_df.to_csv(DECISIONS_PATH, index=False)
+        _gsheet_overwrite("decisions", updated_df, DECISION_COLUMNS)
         return "created"
 
     existing_row = decisions_df.loc[existing_mask].iloc[0]
@@ -200,6 +306,7 @@ def save_decision(entry: dict) -> str:
     )
     updated_df = updated_df[DECISION_COLUMNS].copy()
     updated_df.to_csv(DECISIONS_PATH, index=False)
+    _gsheet_overwrite("decisions", updated_df, DECISION_COLUMNS)
     return "updated"
 
 
@@ -892,7 +999,7 @@ def render_case_edit_dialog(
         default_primary: str | None = None
         default_secondary: str | None = None
         default_comment = ""
-        reviewer = "reviewer_1"
+        reviewer = st.session_state.get("active_participant_id", "").strip() or "anonymous"
         if current_decision is not None:
             current_action = str(current_decision["reviewer_decision"])
             if current_action == "confirm":
@@ -1129,9 +1236,15 @@ def render_decision_confirm_dialog() -> None:
 
 
 def load_evaluations(path: Path) -> pd.DataFrame:
-    if not path.exists():
+    # Try Google Sheets first
+    gsheet_df = _gsheet_read("evaluation_log", EVALUATION_COLUMNS)
+    if gsheet_df is not None:
+        eval_df = gsheet_df
+    elif not path.exists():
         return pd.DataFrame(columns=EVALUATION_COLUMNS)
-    eval_df = pd.read_csv(path)
+    else:
+        eval_df = pd.read_csv(path)
+
     for col in EVALUATION_COLUMNS:
         if col not in eval_df.columns:
             eval_df[col] = ""
@@ -1142,6 +1255,7 @@ def save_evaluation(entry: dict) -> None:
     eval_df = load_evaluations(EVALUATION_PATH)
     eval_df = pd.concat([eval_df, pd.DataFrame([entry])], ignore_index=True)
     eval_df.to_csv(EVALUATION_PATH, index=False)
+    _gsheet_overwrite("evaluation_log", eval_df, EVALUATION_COLUMNS)
 
 
 def write_empty_csv(path: Path, columns: list[str]) -> None:
@@ -1154,9 +1268,39 @@ def reset_demo_and_evaluation_state() -> dict[str, int]:
     evaluations_count = len(load_evaluations(EVALUATION_PATH))
     write_empty_csv(DECISIONS_PATH, DECISION_COLUMNS)
     write_empty_csv(EVALUATION_PATH, EVALUATION_COLUMNS)
+    _gsheet_overwrite("decisions", pd.DataFrame(columns=DECISION_COLUMNS), DECISION_COLUMNS)
+    _gsheet_overwrite("evaluation_log", pd.DataFrame(columns=EVALUATION_COLUMNS), EVALUATION_COLUMNS)
     return {
         "decisions_removed": int(decisions_count),
         "evaluations_removed": int(evaluations_count),
+    }
+
+
+def reset_participant_state(participant_id: str) -> dict[str, int]:
+    """Reset only the decisions and evaluations for a specific participant."""
+    pid = str(participant_id).strip()
+
+    # Remove participant's decisions
+    decisions_df = load_decisions(DECISIONS_PATH)
+    participant_mask = decisions_df["reviewer"].astype(str).str.strip() == pid
+    decisions_removed = int(participant_mask.sum())
+    remaining = decisions_df[~participant_mask].copy()
+    remaining = remaining[DECISION_COLUMNS].copy()
+    remaining.to_csv(DECISIONS_PATH, index=False)
+    _gsheet_overwrite("decisions", remaining, DECISION_COLUMNS)
+
+    # Remove participant's evaluations
+    eval_df = load_evaluations(EVALUATION_PATH)
+    eval_mask = eval_df["participant_id"].astype(str).str.strip() == pid
+    evaluations_removed = int(eval_mask.sum())
+    remaining_eval = eval_df[~eval_mask].copy()
+    remaining_eval = remaining_eval[EVALUATION_COLUMNS].copy()
+    remaining_eval.to_csv(EVALUATION_PATH, index=False)
+    _gsheet_overwrite("evaluation_log", remaining_eval, EVALUATION_COLUMNS)
+
+    return {
+        "decisions_removed": decisions_removed,
+        "evaluations_removed": evaluations_removed,
     }
 
 
@@ -1641,13 +1785,21 @@ def show_heatmap_cell_dialog(
     heatmap_mode: str,
     metric_name: str,
 ) -> None:
+    ALL_LABEL = "Alle"
+    is_row_all = row_value == ALL_LABEL
+    is_col_all = col_value == ALL_LABEL
+
     dialog_df = cases_df.copy()
     dialog_df[row_dim] = dialog_df[row_dim].apply(lambda v: safe_text(v, "–"))
     dialog_df[col_dim] = dialog_df[col_dim].apply(lambda v: safe_text(v, "–"))
-    cell_df = dialog_df[
-        (dialog_df[row_dim].astype(str) == str(row_value))
-        & (dialog_df[col_dim].astype(str) == str(col_value))
-    ].copy()
+
+    # Filter: skip dimension if "Alle" is selected
+    mask = pd.Series(True, index=dialog_df.index)
+    if not is_row_all:
+        mask = mask & (dialog_df[row_dim].astype(str) == str(row_value))
+    if not is_col_all:
+        mask = mask & (dialog_df[col_dim].astype(str) == str(col_value))
+    cell_df = dialog_df[mask].copy()
 
     if len(cell_df) == 0:
         st.warning("Für die ausgewählte Zelle sind im aktuellen Filterkontext keine Fälle vorhanden.")
@@ -1848,15 +2000,32 @@ def render_peer_group_comparison(cases_df: pd.DataFrame, case_row: pd.Series) ->
         & (cases_df["application"] == case_row["application"])
     ].copy()
     comparison_mode = "gleiche Rolle + gleiche Anwendung"
-    if len(peer_df) == 0:
+
+    if len(peer_df) < 3:
         peer_df = cases_df[
             (cases_df["case_id"] != case_row["case_id"]) & (cases_df["role"] == case_row["role"])
         ].copy()
-        comparison_mode = "gleiche Rolle (Fallback)"
+        comparison_mode = "gleiche Rolle"
 
     if len(peer_df) < 3:
-        st.info("Für diese Kombination steht keine ausreichend große Peer-Group zur Verfügung.")
+        peer_df = cases_df[
+            (cases_df["case_id"] != case_row["case_id"])
+            & (cases_df["department"] == case_row["department"])
+        ].copy()
+        comparison_mode = "gleiche Abteilung"
+
+    if len(peer_df) < 3:
+        peer_df = cases_df[
+            (cases_df["case_id"] != case_row["case_id"])
+            & (cases_df["entitlement"] == case_row["entitlement"])
+        ].copy()
+        comparison_mode = "gleiches Entitlement"
+
+    if len(peer_df) < 3:
+        st.info("Für diese Kombination steht keine ausreichend große Peer-Group zur Verfügung (< 3 Vergleichsfälle nach allen Fallback-Stufen).")
         return
+
+    st.caption(f"Vergleichskriterium: {comparison_mode} ({len(peer_df)} Fälle)")
     comparison_group_key = f"role={safe_text(case_row['role'])}|app={safe_text(case_row['application'])}|mode={comparison_mode}"
     current_case_id = str(case_row["case_id"])
 
@@ -2824,8 +2993,13 @@ def render_heatmap(cases_df: pd.DataFrame) -> None:
         )
 
     st.markdown("**Zellauswahl für Drill-down**")
+    st.caption('Wählen Sie \u201eAlle\u201c, um eine gesamte Zeile oder Spalte aggregiert zu betrachten.')
     select_col_1, select_col_2, select_col_3 = st.columns([1, 1, 1])
     active_selection = st.session_state.get("heatmap_selected_cell")
+
+    ALL_LABEL = "Alle"
+    row_options = [ALL_LABEL] + row_labels
+    col_options = [ALL_LABEL] + col_labels
 
     row_default_idx = 0
     col_default_idx = 0
@@ -2837,22 +3011,22 @@ def render_heatmap(cases_df: pd.DataFrame) -> None:
         ):
             current_row = str(active_selection.get("row_value", ""))
             current_col = str(active_selection.get("col_value", ""))
-            if current_row in row_labels:
-                row_default_idx = row_labels.index(current_row)
-            if current_col in col_labels:
-                col_default_idx = col_labels.index(current_col)
+            if current_row in row_options:
+                row_default_idx = row_options.index(current_row)
+            if current_col in col_options:
+                col_default_idx = col_options.index(current_col)
 
     with select_col_1:
         selected_row = st.selectbox(
             y_title,
-            options=row_labels,
+            options=row_options,
             index=row_default_idx,
             key=f"heatmap_row_selector_{heatmap_mode}_{selected_metric}",
         )
     with select_col_2:
         selected_col = st.selectbox(
             x_title,
-            options=col_labels,
+            options=col_options,
             index=col_default_idx,
             key=f"heatmap_col_selector_{heatmap_mode}_{selected_metric}",
         )
@@ -2864,8 +3038,25 @@ def render_heatmap(cases_df: pd.DataFrame) -> None:
             width="stretch",
         )
 
+    is_row_all = selected_row == ALL_LABEL
+    is_col_all = selected_col == ALL_LABEL
     chosen_cell = (str(selected_row), str(selected_col))
-    if chosen_cell in detail_idx.index:
+
+    # Preview info
+    if is_row_all and is_col_all:
+        st.info(
+            f"Ausgewählte Aggregation: Alle {y_title}n × Alle {x_title}en | Fälle: {len(cases_df)}"
+        )
+    elif is_row_all or is_col_all:
+        preview_dim = col_dim if is_row_all else row_dim
+        preview_val = selected_col if is_row_all else selected_row
+        preview_label = x_title if is_row_all else y_title
+        preview_df = heatmap_df[heatmap_df[preview_dim].astype(str) == str(preview_val)]
+        st.info(
+            f"Ausgewählte Aggregation: {preview_label} = {safe_text(preview_val)} (alle {'Zeilen' if is_row_all else 'Spalten'}) | "
+            f"Fälle: {len(preview_df)}"
+        )
+    elif chosen_cell in detail_idx.index:
         d = detail_idx.loc[chosen_cell]
         metric_preview = (
             f"{float(d[metric_col]):.1%}" if z_format == ".1%" else f"{float(d[metric_col]):.1f}"
@@ -2880,7 +3071,13 @@ def render_heatmap(cases_df: pd.DataFrame) -> None:
         )
 
     if open_detail:
-        if chosen_cell in valid_data_pairs:
+        has_data = False
+        if is_row_all or is_col_all:
+            has_data = True
+        elif chosen_cell in valid_data_pairs:
+            has_data = True
+
+        if has_data:
             selected_context = (
                 f"{heatmap_mode}|{selected_metric}|{chosen_cell[0]}|{chosen_cell[1]}"
             )
@@ -2924,9 +3121,13 @@ def render_heatmap(cases_df: pd.DataFrame) -> None:
         clear_heatmap_selection_state()
         return
 
-    if (row_value, col_value) not in valid_data_pairs:
-        clear_heatmap_selection_state()
-        return
+    is_row_all_dialog = row_value == "Alle"
+    is_col_all_dialog = col_value == "Alle"
+
+    if not is_row_all_dialog and not is_col_all_dialog:
+        if (row_value, col_value) not in valid_data_pairs:
+            clear_heatmap_selection_state()
+            return
 
     show_heatmap_cell_dialog(
         cases_df=cases_df,
@@ -2947,6 +3148,9 @@ def render_case_view(cases_df: pd.DataFrame, decisions_df: pd.DataFrame) -> None
     st.caption(
         "Ein Fall entspricht einer konkreten Nutzer-Berechtigungs-Zuweisung, die im Rahmen der Rezertifizierung geprüft wird."
     )
+
+    if not st.session_state.get("active_participant_id", "").strip():
+        st.warning("Bitte geben Sie in der Sidebar Ihre Teilnehmer-ID ein, damit Ihre Entscheidungen korrekt zugeordnet werden.")
 
     if len(cases_df) == 0:
         st.warning("Keine Fälle im aktuellen Filterkontext.")
@@ -3154,52 +3358,156 @@ def render_audit_log(
 
 def render_evaluation_mode() -> None:
     st.subheader("Evaluation")
-    st.caption("Kompakte Evaluation mit 3 Aufgaben und 5 Likert-Fragen (1-5).")
+    st.caption(
+        "Bitte bearbeiten Sie zuerst die Aufgaben in den Tabs Übersicht, Struktur, Fallprüfung und Audit Log. "
+        "Füllen Sie anschließend die Reflexionsfragen und den Fragebogen hier aus."
+    )
 
     reset_feedback = st.session_state.pop("reset_feedback", None)
     if reset_feedback:
         st.success(str(reset_feedback))
 
+    participant_id = st.session_state.get("active_participant_id", "").strip()
+    if not participant_id:
+        st.warning(
+            "Bitte geben Sie zuerst Ihre Teilnehmer-ID in der Sidebar ein, "
+            "bevor Sie die Evaluation ausfüllen."
+        )
+        return
+
     decisions_df = load_decisions(DECISIONS_PATH)
     eval_df = load_evaluations(EVALUATION_PATH)
-    status_col_1, status_col_2 = st.columns(2)
-    with status_col_1:
-        st.metric("Gespeicherte Entscheidungen", len(decisions_df))
-    with status_col_2:
-        st.metric("Evaluationseinträge", len(eval_df))
 
-    with st.expander("Administration (vor einem Walkthrough)", expanded=False):
+    # --- Status metrics scoped to current participant ---
+    participant_decisions = decisions_df[
+        decisions_df["reviewer"].astype(str).str.strip() == participant_id
+    ]
+    participant_evals = eval_df[
+        eval_df["participant_id"].astype(str).str.strip() == participant_id
+    ]
+    status_col_1, status_col_2, status_col_3 = st.columns(3)
+    with status_col_1:
+        st.metric("Ihre Entscheidungen", len(participant_decisions))
+    with status_col_2:
+        st.metric("Alle Entscheidungen", len(decisions_df))
+    with status_col_3:
+        st.metric("Ihre Evaluationseinträge", len(participant_evals))
+
+    if len(participant_evals) > 0:
+        st.info(
+            f"Sie haben bereits {len(participant_evals)} Evaluation(en) abgegeben. "
+            "Eine erneute Abgabe erstellt einen zusätzlichen Eintrag."
+        )
+
+    with st.expander("Administration", expanded=False):
         st.caption(
-            "Setzt nur Entscheidungen und Evaluationseinträge zurück. Der Falldatensatz bleibt unverändert."
+            "Setzt nur Ihre eigenen Entscheidungen und Evaluationseinträge zurück. "
+            "Entscheidungen anderer Teilnehmer und der Falldatensatz bleiben unverändert."
         )
         if st.button(
-            "Demo-/Evaluationszustand zurücksetzen",
-            key="reset_demo_evaluation_state_btn",
+            f"Eigene Daten zurücksetzen ({participant_id})",
+            key="reset_participant_state_btn",
             type="secondary",
         ):
-            reset_result = reset_demo_and_evaluation_state()
+            reset_result = reset_participant_state(participant_id)
             clear_session_state_after_reset()
             st.session_state["reset_feedback"] = (
-                "Reset abgeschlossen: "
+                f"Reset für {participant_id} abgeschlossen: "
                 f"{reset_result['decisions_removed']} Entscheidungen und "
                 f"{reset_result['evaluations_removed']} Evaluationseinträge entfernt."
             )
             st.rerun()
 
-    participant_id = st.text_input("Teilnehmer-ID", value="P-001")
+    st.divider()
 
-    st.write("**Aufgaben (erledigt?)**")
+    # ===== AUFGABEN (Checkboxen) =====
+    st.markdown("### Teil 1: Aufgaben")
+    st.caption("Bitte haken Sie ab, welche Aufgaben Sie bearbeitet haben.")
     task_1 = st.checkbox(
-        "Identifizieren Sie in der Übersicht und Heatmap die Abteilung mit den meisten kritischen Fällen und filtern Sie darauf."
+        "**Aufgabe 1:** Identifizieren Sie in der Übersicht und Heatmap die Abteilung mit den meisten "
+        "kritischen Fällen und navigieren Sie zu den Details.",
+        key="eval_task_1",
     )
     task_2 = st.checkbox(
-        "Öffnen Sie einen Fall mit hohem Risiko-Score, prüfen Sie die KI-Erklärung und treffen Sie eine begründete Entscheidung mit Kommentar."
+        "**Aufgabe 2:** Öffnen Sie einen Fall mit hohem Risiko-Score, prüfen Sie die KI-Erklärung und "
+        "treffen Sie eine begründete Entscheidung mit Kommentar.",
+        key="eval_task_2",
     )
     task_3 = st.checkbox(
-        "Prüfen Sie im Audit Log, ob Ihre Entscheidung korrekt protokolliert wurde."
+        "**Aufgabe 3:** Prüfen Sie im Audit Log, ob Ihre Entscheidung korrekt protokolliert wurde.",
+        key="eval_task_3",
     )
 
-    st.write("**Likert-Fragen (1 = stimme gar nicht zu, 5 = stimme voll zu)**")
+    st.divider()
+
+    # ===== REFLEXIONSFRAGEN =====
+    st.markdown("### Teil 2: Reflexionsfragen")
+    st.caption(
+        "Bitte beantworten Sie die folgenden Fragen zu Ihren Erfahrungen bei der Bearbeitung der Aufgaben."
+    )
+
+    with st.expander("Reflexion zu Aufgabe 1 (Überblick und Priorisierung)", expanded=True):
+        reflect_task1 = st.text_area(
+            "Welche Sichten und Interaktionen haben Sie genutzt, um die kritischste Abteilung zu identifizieren? "
+            "Was hat Ihnen geholfen, was hat gefehlt?",
+            max_chars=1000,
+            key="eval_reflect_task1",
+            height=100,
+        )
+        reflect_task1_dept = st.text_area(
+            "Welche Abteilung haben Sie als kritischste identifiziert und warum? (1–2 Sätze)",
+            max_chars=500,
+            key="eval_reflect_task1_dept",
+            height=68,
+        )
+
+    with st.expander("Reflexion zu Aufgabe 2 (Einzelfallprüfung)", expanded=True):
+        reflect_task2_explanation = st.text_area(
+            "Können Sie in 2–3 Sätzen erklären, warum das System die angezeigte Empfehlung für Ihren "
+            "gewählten Fall ausspricht?",
+            max_chars=1000,
+            key="eval_reflect_task2_explanation",
+            height=100,
+        )
+        reflect_task2_components = st.multiselect(
+            "Welche Erklärungsbausteine haben Sie bei der Fallprüfung genutzt?",
+            options=[
+                "Faktordiagramm (Einfluss einzelner Faktoren)",
+                "Peer-Group-Vergleich",
+                "Berechtigungshistorie (Zeitstrahl)",
+                "Ähnliche Fälle",
+                "Keines davon",
+            ],
+            key="eval_reflect_task2_components",
+        )
+        reflect_task2_component_feedback = st.text_area(
+            "War ein Erklärungsbaustein besonders hilfreich oder hat gefehlt? (optional)",
+            max_chars=500,
+            key="eval_reflect_task2_component_feedback",
+            height=68,
+        )
+
+    with st.expander("Reflexion zu Aufgabe 3 (Audit Log)", expanded=True):
+        reflect_task3_own_decision = st.text_area(
+            "Konnten Sie Ihre eigene Entscheidung im Audit Log wiederfinden? "
+            "Welche Informationen waren dokumentiert?",
+            max_chars=500,
+            key="eval_reflect_task3_own",
+            height=80,
+        )
+        reflect_task3_override = st.text_area(
+            "Konnten Sie einen Fall finden, bei dem ein Reviewer von der KI-Empfehlung abgewichen ist? "
+            "Welche Informationen waren dazu protokolliert?",
+            max_chars=500,
+            key="eval_reflect_task3_override",
+            height=80,
+        )
+
+    st.divider()
+
+    # ===== LIKERT-FRAGEN =====
+    st.markdown("### Teil 3: Bewertung")
+    st.caption("Bitte bewerten Sie die folgenden Aussagen (1 = stimme gar nicht zu, 5 = stimme voll zu).")
     q1 = st.radio(
         "1) Die KI-Empfehlungen waren nachvollziehbar.",
         options=[1, 2, 3, 4, 5],
@@ -3231,24 +3539,60 @@ def render_evaluation_mode() -> None:
         key="eval_q5",
     )
 
-    eval_comment = st.text_area("Optionaler Kommentar", max_chars=500, key="eval_comment")
+    st.divider()
 
-    if st.button("Evaluation speichern", key="save_evaluation_btn"):
+    # ===== HINTERGRUND + KOMMENTAR =====
+    st.markdown("### Teil 4: Hintergrund und Kommentar")
+    professional_background = st.text_input(
+        "In welchem beruflichen/akademischen Bereich sind Sie tätig? (optional)",
+        max_chars=200,
+        key="eval_professional_background",
+        placeholder="z. B. IT-Sicherheit, IAM-Administration, Wirtschaftsinformatik-Studium",
+    )
+    iam_experience = st.radio(
+        "Wie schätzen Sie Ihre Erfahrung im Bereich Identity and Access Management ein?",
+        options=[1, 2, 3, 4, 5],
+        horizontal=True,
+        key="eval_iam_experience",
+        captions=["keine", "gering", "mittel", "gut", "umfangreich"],
+    )
+    eval_comment = st.text_area(
+        "Haben Sie weitere Anmerkungen, Verbesserungsvorschläge oder Beobachtungen? (optional)",
+        max_chars=1000,
+        key="eval_comment",
+        height=100,
+    )
+
+    st.divider()
+
+    # ===== SPEICHERN =====
+    if st.button("Evaluation speichern", key="save_evaluation_btn", type="primary"):
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "participant_id": participant_id.strip() or "unknown",
+            "participant_id": participant_id,
             "task_1_completed": int(task_1),
             "task_2_completed": int(task_2),
             "task_3_completed": int(task_3),
+            "reflect_task1": reflect_task1.strip(),
+            "reflect_task1_dept": reflect_task1_dept.strip(),
+            "reflect_task2_explanation": reflect_task2_explanation.strip(),
+            "reflect_task2_components": "; ".join(reflect_task2_components),
+            "reflect_task2_component_feedback": reflect_task2_component_feedback.strip(),
+            "reflect_task3_own_decision": reflect_task3_own_decision.strip(),
+            "reflect_task3_override": reflect_task3_override.strip(),
             "likert_q1": int(q1),
             "likert_q2": int(q2),
             "likert_q3": int(q3),
             "likert_q4": int(q4),
             "likert_q5": int(q5),
             "comment": eval_comment.strip(),
+            "iam_experience": int(iam_experience),
+            "professional_background": professional_background.strip(),
         }
         save_evaluation(entry)
-        st.success("Evaluation gespeichert.")
+        st.success(
+            f"Evaluation für {participant_id} gespeichert. Vielen Dank!"
+        )
 
 
 def inject_dialog_width_css() -> None:
@@ -3285,6 +3629,66 @@ def inject_accessibility_css() -> None:
     )
 
 
+def seed_demo_decisions() -> None:
+    """Create a small set of demo decisions if the decisions file is empty.
+
+    This ensures the Audit Log is populated for Aufgabe 3 (override detection)
+    even when the first participant starts the evaluation.
+    """
+    if not DECISIONS_PATH.exists():
+        return
+    existing = load_decisions(DECISIONS_PATH)
+    if len(existing) > 0:
+        return
+
+    seed_entries = [
+        {
+            "timestamp": "2026-03-13T09:15:00+00:00",
+            "case_id": "CASE-0031",
+            "reviewer": "demo_reviewer",
+            "recommended": "revoke",
+            "reviewer_decision": "confirm",
+            "final_decision": "revoke",
+            "action_type": "confirm",
+            "comment": "SoD-Konflikt und hohe Inaktivität bestätigen die Empfehlung.",
+        },
+        {
+            "timestamp": "2026-03-13T09:22:00+00:00",
+            "case_id": "CASE-0145",
+            "reviewer": "demo_reviewer",
+            "recommended": "retain",
+            "reviewer_decision": "override_revoke",
+            "final_decision": "revoke",
+            "action_type": "override_revoke",
+            "comment": "Trotz niedrigem Score: Berechtigung wird nicht mehr benötigt (Abteilungswechsel geplant).",
+        },
+        {
+            "timestamp": "2026-03-13T09:30:00+00:00",
+            "case_id": "CASE-0066",
+            "reviewer": "demo_reviewer",
+            "recommended": "review",
+            "reviewer_decision": "escalate",
+            "final_decision": "escalated",
+            "action_type": "escalate",
+            "comment": "Klärung mit Fachbereich Legal erforderlich.",
+        },
+        {
+            "timestamp": "2026-03-13T09:35:00+00:00",
+            "case_id": "CASE-0162",
+            "reviewer": "demo_reviewer",
+            "recommended": "revoke",
+            "reviewer_decision": "confirm",
+            "final_decision": "revoke",
+            "action_type": "confirm",
+            "comment": "Orphan Account nach Austritt; Berechtigung entziehen.",
+        },
+    ]
+
+    seed_df = pd.DataFrame(seed_entries, columns=DECISION_COLUMNS)
+    seed_df.to_csv(DECISIONS_PATH, index=False)
+    _gsheet_overwrite("decisions", seed_df, DECISION_COLUMNS)
+
+
 def main() -> None:
     st.set_page_config(page_title="Mini-IGA Zuweisungsrezertifizierung", layout="wide")
     inject_dialog_width_css()
@@ -3297,6 +3701,27 @@ def main() -> None:
     if not CASES_PATH.exists():
         st.error("Keine Fälledaten gefunden. Bitte zuerst `python generate_data.py` ausführen.")
         return
+
+    # --- Participant session management ---
+    st.sidebar.markdown("### Teilnehmer-Session")
+    if "active_participant_id" not in st.session_state:
+        st.session_state["active_participant_id"] = ""
+    participant_input = st.sidebar.text_input(
+        "Teilnehmer-ID",
+        value=st.session_state.get("active_participant_id", ""),
+        placeholder="z. B. P-001",
+        key="sidebar_participant_id_input",
+        help="Ihre Teilnehmer-ID wird für alle Entscheidungen und die Evaluation verwendet.",
+    )
+    participant_id_clean = participant_input.strip()
+    if participant_id_clean:
+        st.session_state["active_participant_id"] = participant_id_clean
+        st.sidebar.success(f"Aktiv: **{participant_id_clean}**")
+    else:
+        st.sidebar.warning("Bitte Teilnehmer-ID eingeben, um Entscheidungen zu speichern.")
+    st.sidebar.divider()
+
+    seed_demo_decisions()
 
     cases_df = load_cases(CASES_PATH)
     decisions_df = load_decisions(DECISIONS_PATH)

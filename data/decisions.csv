@@ -1,7 +1,5 @@
 timestamp,case_id,reviewer,recommended,reviewer_decision,final_decision,action_type,comment
-2026-03-13T20:00:02.335580+00:00,CASE-0145,reviewer_1,retain,override_revoke,revoke,override_revoke,Falsch
-2026-03-13T22:58:54.874290+00:00,CASE-0003,reviewer_1,revoke,escalate,escalated,escalate,
-2026-03-13T23:39:51.372274+00:00,CASE-0087,reviewer_1,revoke,escalate,escalated,escalate,
-2026-03-13T23:41:16.645853+00:00,CASE-0134,reviewer_1,revoke,confirm,revoke,confirm,
-2026-03-13T23:43:23.070228+00:00,CASE-0191,reviewer_1,revoke,escalate,escalated,escalate,
-2026-03-13T23:57:45.204401+00:00,CASE-0031,reviewer_1,revoke,confirm,revoke,confirm,Alle Faktoren deuten darauf hin
+2026-03-13T09:15:00+00:00,CASE-0031,demo_reviewer,revoke,confirm,revoke,confirm,SoD-Konflikt und hohe Inaktivität bestätigen die Empfehlung.
+2026-03-13T09:22:00+00:00,CASE-0145,demo_reviewer,retain,override_revoke,revoke,override_revoke,Trotz niedrigem Score: Berechtigung wird nicht mehr benötigt (Abteilungswechsel geplant).
+2026-03-13T09:30:00+00:00,CASE-0066,demo_reviewer,review,escalate,escalated,escalate,Klärung mit Fachbereich Legal erforderlich.
+2026-03-13T09:35:00+00:00,CASE-0162,demo_reviewer,revoke,confirm,revoke,confirm,Orphan Account nach Austritt; Berechtigung entziehen.
