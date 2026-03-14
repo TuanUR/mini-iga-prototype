@@ -15,6 +15,8 @@ import random
 from datetime import date, timedelta
 from pathlib import Path
 
+from scoring import evaluate_case
+
 SEED = 42
 N_CASES = 240
 
@@ -29,93 +31,34 @@ ENTITLEMENTS = [
     "admin_console",
     "user_support",
 ]
+MANAGERS_BY_DEPARTMENT = {
+    "Finance": ["Nina Weber", "Lars Hoffmann"],
+    "HR": ["Mara Klein", "Tobias Franke"],
+    "IT": ["Sven Berger", "Julia Neumann"],
+    "Sales": ["Pia Walter", "David Brandt"],
+    "Operations": ["Lea Richter", "Tim Behrens"],
+    "Legal": ["Sara Vogel", "Markus Hahn"],
+}
+ENTITLEMENT_OWNERS = {
+    "read_reports": "Data Governance Team",
+    "approve_payments": "Finance Access Owner",
+    "manage_identities": "IAM Platform Owner",
+    "export_data": "Data Compliance Owner",
+    "admin_console": "Security Operations Owner",
+    "user_support": "Service Desk Owner",
+}
 
 TODAY = date(2026, 3, 12)
-
-
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
-
-def weighted_recommendation(row: dict) -> tuple[int, str, str]:
-    """Transparent, rule-based scoring for IGA review recommendations."""
-    score = 0
-    reasons: list[str] = []
-
-    # --- inactivity ---
-    if row["last_login_days"] > 120:
-        score += 35
-        reasons.append("inactive_login>120d (+35)")
-    elif row["last_login_days"] > 60:
-        score += 20
-        reasons.append("inactive_login>60d (+20)")
-    elif row["last_login_days"] > 30:
-        score += 10
-        reasons.append("inactive_login>30d (+10)")
-
-    # --- stale access ---
-    if row["stale_access_days"] > 365:
-        score += 30
-        reasons.append("stale_access>365d (+30)")
-    elif row["stale_access_days"] > 180:
-        score += 18
-        reasons.append("stale_access>180d (+18)")
-    elif row["stale_access_days"] > 90:
-        score += 8
-        reasons.append("stale_access>90d (+8)")
-
-    # --- privilege level ---
-    if row["privilege_level"] == "high":
-        score += 25
-        reasons.append("high_privilege (+25)")
-    elif row["privilege_level"] == "medium":
-        score += 10
-        reasons.append("medium_privilege (+10)")
-
-    # --- SoD / toxic combo ---
-    if row["toxic_combo"] == 1:
-        score += 40
-        reasons.append("toxic_combination (+40)")
-
-    # --- sensitive role ---
-    if row["role"] in {"Contractor", "Admin"}:
-        score += 10
-        reasons.append("sensitive_role (+10)")
-
-    # --- department change (Mover / Privilege Creep) ---
-    if row.get("department_change_date"):
-        score += 15
-        reasons.append("dept_change_privilege_creep (+15)")
-
-    # --- terminated / inactive user (Leaver / Orphan Account) ---
-    if row.get("user_status") == "terminated":
-        score += 30
-        reasons.append("terminated_user_orphan (+30)")
-    elif row.get("user_status") == "inactive":
-        score += 15
-        reasons.append("inactive_user (+15)")
-
-    # --- classify ---
-    if score >= 70:
-        recommendation = "revoke"
-    elif score >= 35:
-        recommendation = "review"
-    else:
-        recommendation = "retain"
-
-    reason_text = "; ".join(reasons) if reasons else "baseline_risk"
-    return score, recommendation, reason_text
-
-
-def compute_confidence(score: int, recommendation: str) -> float:
-    """Confidence = distance of score from the nearest decision threshold."""
-    if recommendation == "revoke":
-        margin = max(score - 70, 0)
-    elif recommendation == "review":
-        margin = max(min(score - 35, 70 - score), 0)
-    else:
-        margin = max(35 - score, 0)
-    return round(min(99.0, 50.0 + (margin / 35.0) * 49.0), 1)
+DECISION_COLUMNS = [
+    "timestamp",
+    "case_id",
+    "reviewer",
+    "recommended",
+    "reviewer_decision",
+    "final_decision",
+    "action_type",
+    "comment",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +91,18 @@ def _make_history_events(row: dict) -> str:
     events.append(f"{last_login_date}|Login|Letzter Login")
     events.sort(key=lambda e: e.split("|")[0])
     return ";".join(events)
+
+
+def _business_need_text(role: str, application: str, entitlement: str, assignment_type: str) -> str:
+    if assignment_type == "Role-derived":
+        return (
+            f"Berechtigung ist für die Rolle '{role}' in der Anwendung '{application}' "
+            "innerhalb der Standard-Rollenmatrix erforderlich."
+        )
+    return (
+        f"Direkte Zuweisung für eine operative Tätigkeit in '{application}' "
+        f"(Berechtigung: '{entitlement}')."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,12 +173,31 @@ def generate_cases(n_cases: int = N_CASES, seed: int = SEED) -> list[dict]:
             )[0],
             "toxic_combo": random.choices([0, 1], weights=[88, 12], k=1)[0],
         }
+        manager_name = random.choice(MANAGERS_BY_DEPARTMENT.get(department, ["Nicht angegeben"]))
+        assignment_type = random.choices(
+            ["Direct", "Role-derived"],
+            weights=[60, 40] if role in {"Admin", "Contractor"} else [30, 70],
+            k=1,
+        )[0]
+        source_role = f"{department}_{role}_Base" if assignment_type == "Role-derived" else ""
+        effective_permission = not (user_status == "terminated" and random.random() < 0.75)
+        row["business_need"] = _business_need_text(
+            role=role,
+            application=str(row["application"]),
+            entitlement=str(row["entitlement"]),
+            assignment_type=assignment_type,
+        )
+        row["entitlement_owner"] = ENTITLEMENT_OWNERS.get(str(row["entitlement"]), "Access Owner")
+        row["manager_name"] = manager_name
+        row["assignment_type"] = assignment_type
+        row["source_role"] = source_role
+        row["effective_permission"] = bool(effective_permission)
 
-        score, recommendation, reason_text = weighted_recommendation(row)
-        row["risk_score"] = score
-        row["recommendation"] = recommendation
-        row["rule_explanation"] = reason_text
-        row["confidence"] = compute_confidence(score, recommendation)
+        evaluation = evaluate_case(row)
+        row["risk_score"] = int(evaluation["score"])
+        row["recommendation"] = str(evaluation["recommendation"])
+        row["rule_explanation"] = str(evaluation["reason_text"])
+        row["confidence"] = float(evaluation["confidence"])
         row["history_events"] = _make_history_events(row)
 
         rows.append(row)
@@ -236,17 +210,8 @@ def generate_cases(n_cases: int = N_CASES, seed: int = SEED) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def init_decisions_file(path: Path) -> None:
-    columns = [
-        "timestamp",
-        "case_id",
-        "reviewer",
-        "recommended",
-        "final_decision",
-        "action_type",
-        "comment",
-    ]
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
+        writer = csv.DictWriter(f, fieldnames=DECISION_COLUMNS)
         writer.writeheader()
 
 

@@ -1,10 +1,7 @@
 timestamp,case_id,reviewer,recommended,reviewer_decision,final_decision,action_type,comment
-2026-03-12T07:53:22.605435+00:00,CASE-0004,reviewer_1,review,confirm,review,confirm,
-2026-03-12T07:53:29.068547+00:00,CASE-0005,reviewer_1,revoke,confirm,revoke,confirm,
-2026-03-12T07:53:51.963558+00:00,CASE-0003,reviewer_1,revoke,override_revoke,revoke,override_revoke,
-2026-03-12T08:33:40.938274+00:00,CASE-0095,reviewer_1,revoke,confirm,revoke,confirm,
-2026-03-12T17:06:43.155014+00:00,CASE-0091,reviewer_1,revoke,override_retain,retain,override_retain,
-2026-03-12T17:07:39.241164+00:00,CASE-0231,reviewer_1,review,override_revoke,revoke,override_revoke,
-2026-03-12T17:29:43.166381+00:00,CASE-0145,reviewer_1,revoke,override_retain,retain,override_retain,
-2026-03-12T17:30:02.146076+00:00,CASE-0092,reviewer_1,revoke,override_retain,retain,override_retain,
-2026-03-12T17:31:49.559084+00:00,CASE-0106,reviewer_1,revoke,escalate,escalate,escalated,
+2026-03-13T20:00:02.335580+00:00,CASE-0145,reviewer_1,retain,override_revoke,revoke,override_revoke,Falsch
+2026-03-13T22:58:54.874290+00:00,CASE-0003,reviewer_1,revoke,escalate,escalated,escalate,
+2026-03-13T23:39:51.372274+00:00,CASE-0087,reviewer_1,revoke,escalate,escalated,escalate,
+2026-03-13T23:41:16.645853+00:00,CASE-0134,reviewer_1,revoke,confirm,revoke,confirm,
+2026-03-13T23:43:23.070228+00:00,CASE-0191,reviewer_1,revoke,escalate,escalated,escalate,
+2026-03-13T23:57:45.204401+00:00,CASE-0031,reviewer_1,revoke,confirm,revoke,confirm,Alle Faktoren deuten darauf hin

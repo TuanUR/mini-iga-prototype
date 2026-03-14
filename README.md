@@ -5,7 +5,7 @@ Minimaler Masterarbeits-Prototyp für **Identity Governance and Administration (
 ## Features
 
 - Generierung synthetischer Review-Fälle
-- Transparente, gewichtete Regel-Logik für Empfehlungen:
+- Transparente, gewichtete Regel-Logik für Empfehlungen (zentral in `scoring.py`):
   - `retain`
   - `review`
   - `revoke`
@@ -14,12 +14,20 @@ Minimaler Masterarbeits-Prototyp für **Identity Governance and Administration (
   - `Department x Application` oder
   - `Role x Entitlement`
 - Fallansicht mit lokaler Erklärung (Score + Regelbeiträge)
+- Ergänzter Governance-Fallkontext in der Fallprüfung:
+  - `business_need`
+  - `entitlement_owner`
+  - `manager_name`
+  - `assignment_type` (`Direct` / `Role-derived`)
+  - `source_role`
+  - `effective_permission`
 - Entscheidungs-Workflow: Confirm / Override / Comment
 - Audit Log als CSV (`data/decisions.csv`)
 
 ## Projektstruktur
 
 - `requirements.txt`
+- `scoring.py` (gemeinsame Scoring- und Confidence-Logik für Generator + UI)
 - `generate_data.py`
 - `app.py`
 - `data/review_cases.csv`
@@ -56,6 +64,19 @@ Die Empfehlung entsteht über additive Gewichte, u. a. für:
 - Privilegstufe (`privilege_level`)
 - toxische Kombination (`toxic_combo`)
 - sensible Rollen (`Admin`, `Contractor`)
+
+Zusätzlich werden entlastende Faktoren mit negativen Beiträgen berücksichtigt, z. B.:
+
+- sehr aktuelle Nutzung
+- kürzlich genutzte Berechtigung
+- niedriges Privileg
+- kein SoD-Konflikt
+- aktiver Benutzer
+- kein Abteilungswechsel
+
+Die Logik wird einmalig in `scoring.py` definiert.  
+`evaluate_case(...)` ist der zentrale Einstiegspunkt und wird sowohl vom Datengenerator (`generate_data.py`) als auch von der UI-Erklärung (`app.py`) direkt verwendet.
+`weighted_recommendation(...)` bleibt als kompatibler Wrapper erhalten.
 
 Schwellenwerte:
 
