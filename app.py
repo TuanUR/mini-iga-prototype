@@ -190,8 +190,8 @@ def ensure_decision_schema(decisions_df: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def load_decisions(path: Path) -> pd.DataFrame:
-    # Try Google Sheets first
+def load_decisions_full(path: Path) -> pd.DataFrame:
+    """Load ALL decision rows including revision history (no deduplication)."""
     gsheet_df = _gsheet_read("decisions", DECISION_COLUMNS)
     if gsheet_df is not None:
         raw_df = gsheet_df
@@ -200,7 +200,6 @@ def load_decisions(path: Path) -> pd.DataFrame:
     else:
         raw_df = pd.read_csv(path)
 
-    schema_changed = list(raw_df.columns) != DECISION_COLUMNS
     decisions_df = ensure_decision_schema(raw_df)
     decisions_df["recommended"] = decisions_df["recommended"].fillna("").astype(str)
     decisions_df["reviewer_decision"] = decisions_df["reviewer_decision"].fillna("").astype(str)
@@ -241,19 +240,23 @@ def load_decisions(path: Path) -> pd.DataFrame:
 
     decisions_df["final_decision"] = decisions_df.apply(_normalize_final_decision, axis=1)
     decisions_df["action_type"] = decisions_df["reviewer_decision"]
+    return decisions_df.sort_values("timestamp").reset_index(drop=True)
 
-    if len(decisions_df) == 0:
-        return decisions_df
 
-    normalized = (
-        decisions_df.sort_values("timestamp")
+def load_decisions(path: Path) -> pd.DataFrame:
+    """Load decisions deduplicated to the latest entry per case_id.
+
+    Used for app logic (case status, current decision display).
+    For the full audit trail, use load_decisions_full().
+    """
+    full_df = load_decisions_full(path)
+    if len(full_df) == 0:
+        return full_df
+    return (
+        full_df.sort_values("timestamp")
         .drop_duplicates(subset=["case_id"], keep="last")
         .reset_index(drop=True)
     )
-    if schema_changed or len(normalized) != len(decisions_df):
-        normalized.to_csv(path, index=False)
-        _gsheet_overwrite("decisions", normalized, DECISION_COLUMNS)
-    return normalized
 
 
 def is_missing_value(value: object) -> bool:
@@ -296,37 +299,36 @@ def format_confidence_display(confidence_value: object) -> str:
 
 
 def save_decision(entry: dict) -> str:
-    decisions_df = load_decisions(DECISIONS_PATH)
+    """Append a decision as a new row — never overwrite previous entries.
+
+    This creates a full audit trail: every decision (including revisions)
+    is preserved with its own timestamp. The app uses load_decisions()
+    (which deduplicates to the latest per case_id) for status display,
+    while render_audit_log uses load_decisions_full() to show the
+    complete history.
+    """
+    full_df = load_decisions_full(DECISIONS_PATH)
     case_id = str(entry["case_id"])
-    existing_mask = decisions_df["case_id"].astype(str) == case_id
 
-    if not existing_mask.any():
-        updated_df = pd.concat([decisions_df, pd.DataFrame([entry])], ignore_index=True)
-        updated_df = updated_df[DECISION_COLUMNS].copy()
-        updated_df.to_csv(DECISIONS_PATH, index=False)
-        _gsheet_overwrite("decisions", updated_df, DECISION_COLUMNS)
-        return "created"
+    # Check if identical to the most recent entry for this case
+    case_entries = full_df[full_df["case_id"].astype(str) == case_id]
+    if len(case_entries) > 0:
+        latest = case_entries.sort_values("timestamp").iloc[-1]
+        if (
+            str(latest["reviewer_decision"]).strip() == str(entry["reviewer_decision"]).strip()
+            and str(latest["comment"]).strip() == str(entry.get("comment", "")).strip()
+        ):
+            return "unchanged"
 
-    existing_row = decisions_df.loc[existing_mask].iloc[0]
-    existing_decision = str(existing_row["reviewer_decision"])
-    existing_comment = str(existing_row["comment"]).strip()
-    new_decision = str(entry["reviewer_decision"])
-    new_comment = str(entry["comment"]).strip()
-
-    if existing_decision == new_decision and existing_comment == new_comment:
-        return "unchanged"
-
-    updated_df = decisions_df.loc[~existing_mask].copy()
-    updated_df = pd.concat([updated_df, pd.DataFrame([entry])], ignore_index=True)
-    updated_df = (
-        updated_df.sort_values("timestamp")
-        .drop_duplicates(subset=["case_id"], keep="last")
-        .reset_index(drop=True)
-    )
+    # Append new row
+    new_row = pd.DataFrame([entry])
+    updated_df = pd.concat([full_df, new_row], ignore_index=True)
     updated_df = updated_df[DECISION_COLUMNS].copy()
     updated_df.to_csv(DECISIONS_PATH, index=False)
     _gsheet_overwrite("decisions", updated_df, DECISION_COLUMNS)
-    return "updated"
+
+    is_revision = len(case_entries) > 0
+    return "updated" if is_revision else "created"
 
 
 def get_current_decision(decisions_df: pd.DataFrame, case_id: str) -> pd.Series | None:
@@ -1283,7 +1285,7 @@ def write_empty_csv(path: Path, columns: list[str]) -> None:
 
 
 def reset_demo_and_evaluation_state() -> dict[str, int]:
-    decisions_count = len(load_decisions(DECISIONS_PATH))
+    decisions_count = len(load_decisions_full(DECISIONS_PATH))
     evaluations_count = len(load_evaluations(EVALUATION_PATH))
     write_empty_csv(DECISIONS_PATH, DECISION_COLUMNS)
     write_empty_csv(EVALUATION_PATH, EVALUATION_COLUMNS)
@@ -1299,11 +1301,11 @@ def reset_participant_state(participant_id: str) -> dict[str, int]:
     """Reset only the decisions and evaluations for a specific participant."""
     pid = str(participant_id).strip()
 
-    # Remove participant's decisions
-    decisions_df = load_decisions(DECISIONS_PATH)
-    participant_mask = decisions_df["reviewer"].astype(str).str.strip() == pid
+    # Remove participant's decisions (all versions)
+    full_df = load_decisions_full(DECISIONS_PATH)
+    participant_mask = full_df["reviewer"].astype(str).str.strip() == pid
     decisions_removed = int(participant_mask.sum())
-    remaining = decisions_df[~participant_mask].copy()
+    remaining = full_df[~participant_mask].copy()
     remaining = remaining[DECISION_COLUMNS].copy()
     remaining.to_csv(DECISIONS_PATH, index=False)
     _gsheet_overwrite("decisions", remaining, DECISION_COLUMNS)
@@ -3251,9 +3253,21 @@ def render_audit_log(
 ) -> None:
     st.subheader("Audit Log")
     st.caption(
-        "Hier werden KI-Empfehlung, Aktion und finale Entscheidung dokumentiert."
+        "Vollständige Entscheidungshistorie: Jede Entscheidung und jede Revision wird als eigene Zeile protokolliert."
     )
-    filtered_log = decisions_df[decisions_df["case_id"].astype(str).isin(filtered_case_ids)].copy()
+
+    # Use FULL history for audit log display
+    full_decisions = load_decisions_full(DECISIONS_PATH)
+    filtered_log = full_decisions[full_decisions["case_id"].astype(str).isin(filtered_case_ids)].copy()
+    if len(filtered_log) == 0:
+        st.info("Für den aktuellen Filterkontext liegen noch keine Entscheidungen vor.")
+        return
+
+    # Mark revisions: if a case_id appears more than once, earlier entries are revisions
+    filtered_log = filtered_log.sort_values("timestamp")
+    filtered_log["_version"] = filtered_log.groupby("case_id").cumcount() + 1
+    filtered_log["_max_version"] = filtered_log.groupby("case_id")["_version"].transform("max")
+    filtered_log["_is_current"] = filtered_log["_version"] == filtered_log["_max_version"]
     if len(filtered_log) == 0:
         st.info("Für den aktuellen Filterkontext liegen noch keine Entscheidungen vor.")
         return
@@ -3272,6 +3286,7 @@ def render_audit_log(
     merged_log["reviewer_decision"] = merged_log["reviewer_decision"].apply(
         lambda v: safe_text(v, "–")
     )
+    merged_log["reviewer"] = merged_log["reviewer"].apply(lambda v: safe_text(v, "–"))
     merged_log["comment"] = merged_log["comment"].apply(lambda v: safe_text(v, "–"))
     merged_log["timestamp"] = merged_log["timestamp"].apply(lambda v: safe_text(v, "–"))
     merged_log["user_name"] = merged_log["user_name"].apply(lambda v: safe_text(v, "–"))
@@ -3282,27 +3297,40 @@ def render_audit_log(
         lambda v: safe_text(v, "–")
     )
 
-    total_decisions = len(merged_log)
-    override_mask = merged_log["reviewer_decision"].str.startswith("override_")
+    total_entries = len(merged_log)
+    current_entries = merged_log[merged_log["_is_current"]].copy()
+    total_current = len(current_entries)
+    revision_count = total_entries - total_current
+    override_mask = current_entries["reviewer_decision"].str.startswith("override_")
     override_count = int(override_mask.sum())
-    override_rate = (override_count / total_decisions) if total_decisions else 0.0
-    escalations_count = int((merged_log["reviewer_decision"] == "escalate").sum())
+    override_rate = (override_count / total_current) if total_current else 0.0
+    escalations_count = int((current_entries["reviewer_decision"] == "escalate").sum())
 
-    kpi_cols = st.columns(3)
+    kpi_cols = st.columns(4)
     with kpi_cols[0]:
-        kpi_value("Entscheidungen gesamt", total_decisions)
+        kpi_value("Aktuelle Entscheidungen", total_current)
     with kpi_cols[1]:
         st.metric("Override-Rate", f"{override_rate:.1%}")
     with kpi_cols[2]:
         kpi_value("Eskalationen", escalations_count)
+    with kpi_cols[3]:
+        kpi_value("Revisionen", revision_count)
     st.caption(
-        "Die Override-Rate kann einen indirekten Hinweis darauf liefern, in welchem Maße die KI-Empfehlungen als hilfreich eingestuft werden. Die Interpretation ist kontextabhängig."
+        "Die Override-Rate bezieht sich auf die jeweils aktuellste Entscheidung pro Fall. "
+        "Revisionen sind frühere Entscheidungen, die durch eine neuere ersetzt wurden."
+    )
+
+    # Add version and status info
+    merged_log["version_label"] = merged_log.apply(
+        lambda r: f"v{int(r['_version'])}" + (" (aktuell)" if r["_is_current"] else " (revidiert)"),
+        axis=1,
     )
 
     merged_log = merged_log[
         [
             "case_id",
             "user_name",
+            "reviewer",
             "department",
             "application",
             "entitlement",
@@ -3310,6 +3338,7 @@ def render_audit_log(
             "case_status",
             "reviewer_decision",
             "final_decision",
+            "version_label",
             "comment",
             "timestamp",
         ]
@@ -3331,10 +3360,12 @@ def render_audit_log(
         columns={
             "case_id": "Fall-ID",
             "user_name": "Mitarbeiter",
+            "reviewer": "Reviewer",
             "department": "Abteilung",
             "application": "Anwendung",
             "entitlement": "Berechtigung",
             "fallstatus": "Fallstatus",
+            "version_label": "Version",
             "hinweis": "Hinweis",
             "comment": "Kommentar",
             "timestamp": "Zeitstempel",
@@ -3343,6 +3374,7 @@ def render_audit_log(
         [
             "Fall-ID",
             "Mitarbeiter",
+            "Reviewer",
             "Abteilung",
             "Anwendung",
             "Berechtigung",
@@ -3350,6 +3382,7 @@ def render_audit_log(
             "ki_empfehlung",
             "reviewer_entscheidung",
             "finale_entscheidung",
+            "Version",
             "Hinweis",
             "Kommentar",
             "Zeitstempel",
