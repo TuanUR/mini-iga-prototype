@@ -1034,9 +1034,6 @@ def render_case_edit_dialog(
             elif current_action == "escalate":
                 default_primary = "escalate"
             default_comment = safe_text(current_decision["comment"], fallback="")
-            reviewer_value = safe_text(current_decision["reviewer"], fallback="")
-            if reviewer_value:
-                reviewer = reviewer_value
 
         primary_key = f"dialog_primary_action_{case_id}"
         secondary_key = f"dialog_secondary_action_{case_id}"
